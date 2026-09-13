@@ -1,0 +1,259 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { PassThrough, Writable } from 'node:stream';
+import { CodexClient } from '../src/codex.mjs';
+
+const cwd = process.cwd();
+const options = { cwd, model: 'gpt-6-astra', effort: 'ultra', prompt: 'Build it.' };
+const model = { id: 'gpt-6-astra', model: 'gpt-6-astra', supportedReasoningEfforts: [{ reasoningEffort: 'ultra' }, { reasoningEffort: 'high' }] };
+
+function harness(handler = () => false, clientOptions = {}) {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killed = false;
+  child.kill = () => { child.killed = true; queueMicrotask(() => child.emit('exit', 0)); };
+  const sent = [];
+  const emit = message => child.stdout.write(`${JSON.stringify(message)}\n`);
+  const respond = (message, result) => emit({ id: message.id, result });
+  const notify = (method, params) => emit({ method, params });
+  let spawnOptions;
+  let spawnArgs;
+  child.stdin = new Writable({ write(chunk, _encoding, callback) {
+    for (const line of chunk.toString().trim().split('\n')) {
+      const message = JSON.parse(line);
+      sent.push(message);
+      queueMicrotask(() => {
+        if (handler(message, { emit, respond, notify, child, sent })) return;
+        if (message.method === 'initialize') respond(message, { userAgent: 'codex' });
+        if (message.method === 'account/read') respond(message, { account: { type: 'chatgpt', email: 'private@example.com', planType: 'pro', token: 'secret' }, requiresOpenaiAuth: true });
+        if (message.method === 'model/list') respond(message, { data: [model], nextCursor: null });
+        if (['thread/start', 'thread/resume'].includes(message.method)) respond(message, {
+          thread: { id: message.params.threadId ?? 'thread-1' }, model: 'gpt-6-astra', modelProvider: 'openai',
+        });
+        if (message.method === 'turn/start') respond(message, { turn: { id: 'turn-1', status: 'inProgress', items: [] } });
+      });
+    }
+    callback();
+  } });
+  const client = new CodexClient({ ...clientOptions, spawnFn: (_command, args, opts) => {
+    spawnArgs = args; spawnOptions = opts; return child;
+  } });
+  return { client, child, sent, emit, respond, notify, get spawnArgs() { return spawnArgs; }, get spawnOptions() { return spawnOptions; } };
+}
+
+const finish = (notify, { threadId = 'thread-1', turnId = 'turn-1', text = 'Done.', status = 'completed' } = {}) =>
+  notify('turn/completed', { threadId, turn: { id: turnId, status, items: [{ type: 'agentMessage', id: 'answer', text, phase: 'final_answer' }] } });
+const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('handshake runs once, disables shell, forces subscription auth and strips secrets', async t => {
+  const previousSecret = process.env.ENIGMA_TEST_PRIVATE;
+  process.env.ENIGMA_TEST_PRIVATE = 'private-test-value';
+  t.after(() => {
+    if (previousSecret === undefined) delete process.env.ENIGMA_TEST_PRIVATE;
+    else process.env.ENIGMA_TEST_PRIVATE = previousSecret;
+  });
+  const h = harness(); t.after(() => h.client.close());
+  await Promise.all([h.client.start(), h.client.start()]);
+  assert.deepEqual(h.sent.slice(0, 2).map(x => x.method), ['initialize', 'initialized']);
+  assert.equal(h.sent[0].params.capabilities.requestAttestation, false);
+  assert.equal(h.spawnOptions.shell, false);
+  assert.equal(h.spawnOptions.windowsHide, true);
+  assert.ok(h.spawnArgs.includes('forced_login_method="chatgpt"'));
+  assert.equal(h.spawnOptions.env.OPENAI_API_KEY, undefined);
+  assert.equal(h.spawnOptions.env.ENIGMA_TEST_PRIVATE, undefined);
+  assert.deepEqual(await h.client.account(), { account: { type: 'chatgpt', planType: 'pro' }, requiresOpenaiAuth: true });
+  assert.deepEqual(await h.client.models(), [model]);
+});
+
+test('model enumeration paginates and detects repeated cursors', async t => {
+  let pages = 0;
+  const h = harness((message, { respond }) => {
+    if (message.method !== 'model/list') return false;
+    pages++;
+    respond(message, { data: [model], nextCursor: pages === 1 ? 'next' : null }); return true;
+  }); t.after(() => h.client.close());
+  assert.equal((await h.client.models()).length, 2);
+  assert.equal(h.sent.find(x => x.params?.cursor)?.params.cursor, 'next');
+  const bad = harness((message, { respond }) => {
+    if (message.method !== 'model/list') return false;
+    respond(message, { data: [], nextCursor: 'loop' }); return true;
+  }); t.after(() => bad.client.close());
+  await assert.rejects(bad.client.models(), { code: 'CODEX_PROTOCOL' });
+});
+
+test('saves thread before work, preserves native role config, collects final messages despite early notifications', async t => {
+  let saved = false;
+  const progress = [];
+  const h = harness((message, { respond, notify }) => {
+    if (message.method !== 'turn/start') return false;
+    assert.equal(saved, true);
+    notify('item/completed', { threadId: 'different', turnId: 'turn-1', item: { id: 'other', type: 'agentMessage', text: 'Wrong.' } });
+    notify('item/completed', { threadId: 'thread-1', turnId: 'old', item: { id: 'old', type: 'agentMessage', text: 'Old.' } });
+    notify('item/completed', { threadId: 'thread-1', turnId: 'turn-1', item: { id: 'comment', type: 'agentMessage', phase: 'commentary', text: 'Working.' } });
+    notify('item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'answer', delta: 'Do' });
+    finish(notify);
+    respond(message, { turn: { id: 'turn-1', status: 'inProgress', items: [] } });
+    return true;
+  }); t.after(() => h.client.close());
+  const result = await h.client.run({ ...options,
+    config: { 'agents.enabled': true, 'agents.default_subagent_reasoning_effort': 'high', sandbox_mode: 'danger-full-access' },
+    onThread: async id => { await tick(); assert.equal(id, 'thread-1'); saved = true; },
+    onProgress: value => progress.push(value),
+  });
+  assert.deepEqual(result, { threadId: 'thread-1', turnId: 'turn-1', text: 'Done.', status: 'completed' });
+  const thread = h.sent.find(x => x.method === 'thread/start').params;
+  assert.equal(thread.config['agents.enabled'], true);
+  assert.equal(thread.config['agents.default_subagent_reasoning_effort'], 'high');
+  assert.equal(thread.config.sandbox_mode, 'workspace-write');
+  assert.equal(thread.config.model_reasoning_effort, 'ultra');
+  assert.equal(thread.approvalsReviewer, 'user');
+  const turn = h.sent.find(x => x.method === 'turn/start').params;
+  assert.equal(turn.effort, 'ultra');
+  assert.equal(turn.sandboxPolicy.networkAccess, false);
+  assert.deepEqual(turn.sandboxPolicy.writableRoots, [cwd]);
+  assert.deepEqual(progress, [{ type: 'working' }]);
+});
+
+test('resume reapplies explicit settings and isolates successive runs', async t => {
+  let count = 0;
+  const h = harness((message, { respond, notify }) => {
+    if (message.method !== 'turn/start') return false;
+    count++;
+    respond(message, { turn: { id: `turn-${count}`, status: 'inProgress' } });
+    finish(notify, { threadId: 'saved-thread', turnId: `turn-${count}`, text: `Done ${count}` }); return true;
+  }); t.after(() => h.client.close());
+  for (let n = 1; n <= 2; n++) assert.equal((await h.client.run({ ...options, threadId: 'saved-thread' })).text, `Done ${n}`);
+  assert.equal(h.sent.filter(x => x.method === 'thread/resume').length, 2);
+  assert.equal(h.sent.some(x => x.method === 'thread/start'), false);
+});
+
+test('UTF-8 and CRLF frames survive chunk boundaries', async t => {
+  const h = harness((message, { child }) => {
+    if (message.method !== 'turn/start') return false;
+    const data = Buffer.from(`${JSON.stringify({ id: message.id, result: { turn: { id: 'turn-1', status: 'completed', items: [{ type: 'agentMessage', id: 'a', text: 'All set 🌍', phase: 'final_answer' }] } } })}\r\n`);
+    for (const byte of data) child.stdout.write(Buffer.from([byte])); return true;
+  }); t.after(() => h.client.close());
+  assert.equal((await h.client.run(options)).text, 'All set 🌍');
+});
+
+test('requires ChatGPT auth and exact model/effort without fallback', async t => {
+  for (const account of [null, { type: 'apiKey' }, { type: 'amazonBedrock' }]) {
+    const h = harness((message, { respond }) => {
+      if (message.method !== 'account/read') return false;
+      respond(message, { account }); return true;
+    }); t.after(() => h.client.close());
+    await assert.rejects(h.client.run(options), { code: 'CODEX_AUTH' });
+    assert.equal(h.sent.some(x => x.method === 'thread/start'), false);
+  }
+  for (const override of [{ model: 'another-model' }, { effort: 'max' }]) {
+    const h = harness(); t.after(() => h.client.close());
+    await assert.rejects(h.client.run({ ...options, ...override }), { code: 'CODEX_MODEL' });
+    assert.equal(h.sent.some(x => x.method === 'turn/start'), false);
+  }
+});
+
+test('rejects model substitution returned by server before turn starts', async t => {
+  const h = harness((message, { respond }) => {
+    if (message.method !== 'thread/start') return false;
+    respond(message, { thread: { id: 'thread-1' }, model: 'different', modelProvider: 'openai' }); return true;
+  }); t.after(() => h.client.close());
+  await assert.rejects(h.client.run(options), { code: 'CODEX_PROTOCOL' });
+  assert.equal(h.sent.some(x => x.method === 'turn/start'), false);
+});
+
+test('all server approval, tool, input and unknown requests fail closed with safe callbacks', async t => {
+  const methods = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval',
+    'item/permissions/requestApproval', 'item/tool/requestUserInput', 'item/tool/call',
+    'mcpServer/elicitation/request', 'execCommandApproval', 'applyPatchApproval',
+    'account/chatgptAuthTokens/refresh', 'secret-unknown-method'];
+  const approvals = [];
+  const h = harness((message, { respond, emit, notify }) => {
+    if (message.method !== 'turn/start') return false;
+    respond(message, { turn: { id: 'turn-1', status: 'inProgress' } });
+    methods.forEach((method, index) => emit({ id: `server-${index}`, method, params: { reason: 'private secret', command: 'sensitive' } }));
+    finish(notify); return true;
+  }); t.after(() => h.client.close());
+  await h.client.run({ ...options, onApproval: value => approvals.push(value) });
+  const replies = h.sent.filter(x => String(x.id).startsWith('server-'));
+  assert.equal(replies.length, methods.length);
+  assert.deepEqual(replies[0].result, { decision: 'decline' });
+  assert.deepEqual(replies[2].result, { permissions: {}, scope: 'turn' });
+  assert.deepEqual(replies[3].result, { answers: {} });
+  assert.equal(replies[4].result.success, false);
+  assert.equal(replies[5].result.action, 'decline');
+  assert.equal(replies[6].result.decision, 'abort');
+  assert.equal(replies[8].error.code, -32601);
+  assert.equal(approvals.length, methods.length);
+  assert.equal(JSON.stringify(approvals).includes('secret'), false);
+});
+
+test('cancellation interrupts and kills active work; parallel run is rejected', async t => {
+  const h = harness(); t.after(() => h.client.close());
+  const controller = new AbortController();
+  const result = h.client.run({ ...options, signal: controller.signal });
+  await tick();
+  await assert.rejects(h.client.run(options), { code: 'CODEX_BUSY' });
+  controller.abort(new Error('private reason'));
+  await assert.rejects(result, { code: 'CODEX_CANCELLED', message: 'Codex task was cancelled.' });
+  assert.ok(h.sent.some(x => x.method === 'turn/interrupt'));
+  assert.equal(h.child.killed, true);
+});
+
+test('timeout during persistence callback prevents model work and rejects promptly', async t => {
+  const h = harness(); t.after(() => h.client.close());
+  await assert.rejects(h.client.run({ ...options, timeoutMs: 20, onThread: () => new Promise(() => {}) }), { code: 'CODEX_TIMEOUT' });
+  assert.equal(h.sent.some(x => x.method === 'turn/start'), false);
+  assert.equal(h.child.killed, true);
+});
+
+test('pre-aborted and invalid runs never start a process', async () => {
+  const h = harness();
+  await assert.rejects(h.client.run({ ...options, signal: AbortSignal.abort() }), { code: 'CODEX_CANCELLED' });
+  await assert.rejects(h.client.run({ ...options, cwd: 'relative' }), TypeError);
+  assert.equal(h.sent.length, 0);
+});
+
+test('persistence failure is sanitized and prevents turn/start', async t => {
+  const h = harness(); t.after(() => h.client.close());
+  await assert.rejects(h.client.run({ ...options, onThread: () => { throw new Error('secret'); } }), { code: 'CODEX_PERSIST' });
+  assert.equal(h.sent.some(x => x.method === 'turn/start'), false);
+});
+
+test('malformed input, oversized frames, process exit and IO failure reject active operations safely', async t => {
+  for (const [trigger, code] of [
+    [h => h.child.stdout.write('not json secret\n'), 'CODEX_PROTOCOL'],
+    [h => h.child.stdout.write('x'.repeat(8 * 1024 * 1024 + 1)), 'CODEX_PROTOCOL'],
+    [h => h.emit([]), 'CODEX_PROTOCOL'],
+    [h => h.child.emit('exit', 1), 'CODEX_EXIT'],
+    [h => h.child.stdin.emit('error', new Error('secret')), 'CODEX_IO'],
+  ]) {
+    const h = harness(); t.after(() => h.client.close());
+    const result = h.client.run(options);
+    await tick(); trigger(h);
+    await assert.rejects(result, error => error.code === code && !error.message.includes('secret'));
+    assert.equal(h.child.killed, true);
+  }
+});
+
+test('RPC error contents are not exposed; request timeout closes transport', async t => {
+  const h = harness((message, { emit }) => {
+    if (message.method !== 'account/read') return false;
+    emit({ id: message.id, error: { code: 42, message: 'secret', data: { token: 'secret' } } }); return true;
+  }); t.after(() => h.client.close());
+  await assert.rejects(h.client.account(), error => error.code === 'CODEX_RPC' && !error.message.includes('secret'));
+  const stuck = harness(message => message.method === 'initialize', { requestTimeoutMs: 10 });
+  await assert.rejects(stuck.client.start(), { code: 'CODEX_RPC_TIMEOUT' });
+  assert.equal(stuck.child.killed, true);
+});
+
+test('failed/interrupted turn statuses return without leaking raw error payloads', async t => {
+  for (const status of ['failed', 'interrupted']) {
+    const h = harness((message, { respond }) => {
+      if (message.method !== 'turn/start') return false;
+      respond(message, { turn: { id: 'turn-1', status, items: [], error: { message: 'secret' } } }); return true;
+    }); t.after(() => h.client.close());
+    assert.deepEqual(await h.client.run(options), { threadId: 'thread-1', turnId: 'turn-1', text: '', status });
+  }
+});
