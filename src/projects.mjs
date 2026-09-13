@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 /** Project descriptors for a configuration already checked by validateConfig. */
 export function configuredProjects(config) {
   const projects = config.projects === undefined
@@ -34,4 +36,3 @@ export function projectIdentity(config, channel) {
   const absolute = path.resolve(repoPath);
   return JSON.stringify([key, process.platform === 'win32' ? absolute.toLowerCase() : absolute]);
 }
-import path from 'node:path';

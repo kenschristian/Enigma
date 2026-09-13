@@ -181,7 +181,7 @@ export class AgentService {
       for (const message of this.store.pendingOutbox()) {
         const connection = this.connections.get(message.botKey);
         if (!connection) continue;
-        try { await connection.post({ channel: message.channel, threadTs: message.threadTs, text: message.text, id: message.id, notifyUserId: message.notifyUserId }); this.store.markDelivered(message.id); }
+        try { await connection.post({ channel: message.channel, threadTs: message.threadTs, text: message.text, id: message.id, notifyUserId: message.notifyUserId, prUrl: message.prUrl }); this.store.markDelivered(message.id); }
         catch (error) { this.store.failDelivery(message.id, (error.retryAfter || 0) * 1000); break; }
       }
     } catch { this.log('Message delivery paused; retrying.'); }

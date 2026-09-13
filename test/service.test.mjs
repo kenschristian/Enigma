@@ -101,3 +101,13 @@ test('an unavailable project mapping fails before any Codex client starts',async
   service.receive(event('E1','work'),connection);service.pump();await drained(service);
   assert.equal(constructed,false);assert.equal(store.list()[0].status,'failed');store.close();
 });
+
+test('durable review recipient and PR link reach Slack delivery together',async()=>{
+  const sent=[];
+  const {store,service}=fixture({connections:new Map([['atlas',{post:async payload=>{sent.push(payload);}}]])});
+  const notice=store.addOutbox({botKey:'atlas',channel:'C1',text:'Ready for review',notifyUserId:'U1',prUrl:'https://github.com/owner/repository/pull/7'});
+  await service.flush();
+  assert.equal(sent.length,1);assert.equal(sent[0].notifyUserId,'U1');
+  assert.equal(sent[0].prUrl,'https://github.com/owner/repository/pull/7');
+  assert.equal(sent[0].id,notice.id);assert.equal(store.pendingOutbox().length,0);store.close();
+});
