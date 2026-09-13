@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, writeFile, readFile, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, mkdir, rm, realpath, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -94,4 +94,36 @@ test('inspect reports safe remote names and dirty state without changing reposit
   assert.equal(info.clean, false);
   assert.deepEqual(info.remotes, ['origin']);
   assert.equal(JSON.stringify(info).includes('secret'), false);
+});
+
+test('Windows short paths reuse Git canonical mappings and still reject changed branches', { skip: process.platform !== 'win32' }, async (t) => {
+  const { repoPath, worktreesRoot } = await fixture(t);
+  await mkdir(worktreesRoot);
+  const shortRoot = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:ENIGMA_TEST_FOLDER).ShortPath'], {
+    encoding: 'utf8', windowsHide: true, env: { ...process.env, ENIGMA_TEST_FOLDER: worktreesRoot },
+  }).trim();
+  if (shortRoot.toLowerCase() === worktreesRoot.toLowerCase()) {
+    t.skip('8.3 short paths are disabled on this test volume');
+    return;
+  }
+  assert.equal((await realpath(shortRoot)).toLowerCase(), (await realpath(worktreesRoot)).toLowerCase());
+  const manager = new WorktreeManager({ repoPath, worktreesRoot: shortRoot });
+  const first = await manager.ensure('short-path-conversation');
+  await writeFile(join(first.path, 'tracked.txt'), 'unfinished through short path');
+  assert.deepEqual(await manager.ensure('short-path-conversation'), first);
+  assert.equal(await readFile(join(first.path, 'tracked.txt'), 'utf8'), 'unfinished through short path');
+  git(first.path, ['switch', '-c', 'user-short-path-branch']);
+  await assert.rejects(manager.ensure('short-path-conversation'), /mapping does not match/);
+  assert.equal(await readFile(join(first.path, 'tracked.txt'), 'utf8'), 'unfinished through short path');
+});
+
+test('a conversation path cannot reuse another mapped worktree through a directory link', async (t) => {
+  const { manager, worktreesRoot } = await fixture(t);
+  const first = await manager.ensure('original');
+  const original = await readFile(join(first.path, 'tracked.txt'), 'utf8');
+  const linkedPath = join(worktreesRoot, hash('linked'));
+  await symlink(first.path, linkedPath, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(manager.ensure('linked'), /already exists|not a regular directory/);
+  assert.equal(await readFile(join(first.path, 'tracked.txt'), 'utf8'), original);
 });

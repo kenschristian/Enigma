@@ -7,6 +7,20 @@ import { resolve, join, normalize } from 'node:path';
 const runFile = promisify(execFile);
 const canonical = (path) => process.platform === 'win32' ? normalize(path).toLowerCase() : normalize(path);
 
+async function existingDirectoryPath(path) {
+  try {
+    // Do not turn a symlink/junction at the conversation path into a valid
+    // mapping. Realpath is only for comparing existing ordinary directories,
+    // notably Windows 8.3 names against the long paths reported by Git.
+    const stat = await lstat(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
+    return canonical(await realpath(path));
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+    throw error;
+  }
+}
+
 export class WorktreeManager {
   constructor({ repoPath, worktreesRoot, gitCommand = 'git' }) {
     this.repoPath = resolve(repoPath);
@@ -62,7 +76,18 @@ export class WorktreeManager {
         return index === -1 ? [line, true] : [line.slice(0, index), line.slice(index + 1)];
       })
     ));
-    const entry = records.find((record) => canonical(resolve(record.worktree)) === canonical(path));
+    let entry = records.find((record) => canonical(resolve(record.worktree)) === canonical(path));
+    if (!entry) {
+      const actualPath = await existingDirectoryPath(path);
+      if (actualPath) {
+        for (const record of records) {
+          if (await existingDirectoryPath(record.worktree) === actualPath) {
+            entry = record;
+            break;
+          }
+        }
+      }
+    }
     if (entry) {
       if (entry.branch !== `refs/heads/${branch}` || entry.bare || entry.prunable) throw new Error('Worktree mapping does not match conversation');
       await this.validate(path, branch);
