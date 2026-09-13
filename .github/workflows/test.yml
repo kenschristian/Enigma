@@ -24,4 +24,7 @@ jobs:
         run: node --test
       - name: Windows setup checks
         shell: powershell
-        run: .\scripts\Test-Scripts.ps1
+        run: .\scripts\Test-Scripts.ps1 -PrivateDirectoryAcl
+      - name: PowerShell 7 setup checks
+        shell: pwsh
+        run: .\scripts\Test-Scripts.ps1 -PrivateDirectoryAcl
