@@ -257,3 +257,34 @@ test('failed/interrupted turn statuses return without leaking raw error payloads
     assert.deepEqual(await h.client.run(options), { threadId: 'thread-1', turnId: 'turn-1', text: '', status });
   }
 });
+
+test('close awaits delayed child exit after cancellation before releasing the caller', async () => {
+  const h = harness();
+  h.child.kill = () => { h.child.killed = true; };
+  const result = h.client.run(options);
+  await tick();
+  const cancelled = assert.rejects(result, { code: 'CODEX_CLOSED' });
+  let closed = false;
+  const cleanup = h.client.close().then(() => { closed = true; });
+  await cancelled;
+  await tick();
+  assert.equal(h.child.killed, true);
+  assert.equal(closed, false);
+  assert.ok(h.sent.some(x => x.method === 'turn/interrupt'));
+  h.child.emit('exit', 0);
+  await cleanup;
+  assert.equal(closed, true);
+  await h.client.close();
+});
+
+test('close reports CODEX_SHUTDOWN when child exit cannot be confirmed within five seconds', async t => {
+  const h = harness();
+  h.child.kill = () => { h.child.killed = true; };
+  await h.client.start();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const cleanup = assert.rejects(h.client.close(), { code: 'CODEX_SHUTDOWN' });
+  t.mock.timers.tick(5000);
+  await cleanup;
+  h.child.emit('exit', 0);
+  await h.client.close();
+});

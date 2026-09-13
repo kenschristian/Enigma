@@ -39,8 +39,14 @@ export class CodexClient {
         env: Object.fromEntries(Object.entries(process.env).filter(([key]) =>
           !/^(OPENAI_API_KEY$|CODEX_API_KEY$|ENIGMA_)/i.test(key))),
       });
-      this.child.on('error', () => this.fail(safeError('CODEX_START', 'Could not start the installed Codex app-server.')));
-      this.child.on('exit', () => this.fail(safeError('CODEX_EXIT', 'Codex app-server exited before the operation finished.')));
+      this.childExit = new Promise(resolve => {
+        this.child.once('exit', () => { resolve(); this.fail(safeError('CODEX_EXIT', 'Codex app-server exited before the operation finished.')); });
+        this.child.on('error', () => {
+          // A failed spawn has no process to wait for. Other errors still require exit confirmation.
+          if (this.child.pid === undefined) resolve();
+          this.fail(safeError('CODEX_START', 'Could not start the installed Codex app-server.'));
+        });
+      });
       this.child.stdout.on('data', chunk => this.receive(chunk));
       this.child.stdout.on('error', () => this.fail(safeError('CODEX_IO', 'Codex output stream failed.')));
       this.child.stdout.on('end', () => this.fail(safeError('CODEX_EXIT', 'Codex app-server output closed.')));
@@ -296,8 +302,19 @@ export class CodexClient {
     }
   }
 
-  close() {
+  async close() {
     if (this.active && !this.active.finished) this.interrupt(safeError('CODEX_CLOSED', 'Codex connection was closed.'));
     else this.fail(safeError('CODEX_CLOSED', 'Codex connection was closed.'));
+    if (!this.childExit) return;
+    let timer;
+    try {
+      await Promise.race([
+        this.childExit,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(safeError('CODEX_SHUTDOWN',
+            'Could not confirm Codex app-server shutdown. Keep this worktree blocked until its process has stopped.')), 5000);
+        }),
+      ]);
+    } finally { clearTimeout(timer); }
   }
 }
