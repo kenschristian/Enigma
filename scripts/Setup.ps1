@@ -3,14 +3,6 @@
 param([string]$RepoPath = (Split-Path -Parent $PSScriptRoot), [switch]$FourBots)
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
-function Read-IdentifierList([string]$Label, [string]$Pattern) {
-    while ($true) {
-        $values = @((Read-Host $Label).Split(',') | ForEach-Object { $_.Trim() } | Select-Object -Unique)
-        if ($values.Count -gt 0 -and @($values | Where-Object { $_ -cnotmatch $Pattern }).Count -eq 0) { return ,$values }
-        Write-Host 'Use exact Slack IDs, separated by commas. Names and workspace URLs are not IDs.' -ForegroundColor Yellow
-    }
-}
-
 function Read-EncryptedToken([string]$Label, [string]$Prefix) {
     while ($true) {
         $secure = Read-Host $Label -AsSecureString
@@ -46,8 +38,7 @@ $nodeVersion = & $node -p 'process.versions.node'
 if ($LASTEXITCODE -ne 0 -or [int]($nodeVersion.Split('.')[0]) -lt 24) { throw 'Node.js 24 or newer is required.' }
 $codexCandidates = @(Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin\*\codex.exe') -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | ForEach-Object FullName)
 $codex = Find-EnigmaExecutable 'codex.exe' $codexCandidates
-$team = @(Read-IdentifierList 'Workspace ID (T...)' '^T[A-Z0-9]+$')
-if ($team.Count -ne 1) { throw 'Configure exactly one Slack workspace.' }
+$team = Read-SlackWorkspaceId
 $users = Read-IdentifierList 'Your allowed Slack member IDs (U... or W...), comma-separated' '^[UW][A-Z0-9]+$'
 $channels = Read-IdentifierList 'Allowed channel IDs (C... or G...), comma-separated' '^[CG][A-Z0-9]+$'
 $roles = @([pscustomobject]@{ key = 'atlas'; role = 'atlas' })
@@ -67,7 +58,7 @@ foreach ($role in $roles) {
 }
 $stateDir = Initialize-PrivateDirectory (Join-Path $privateRoot 'state')
 $worktreesRoot = Initialize-PrivateDirectory (Join-Path $privateRoot 'worktrees')
-$config = [ordered]@{ version = 1; repoPath = $RepoPath; stateDir = $stateDir; worktreesRoot = $worktreesRoot; codexCommand = $codex; allowedTeamId = $team[0]; allowedUserIds = @($users); allowedChannelIds = @($channels); maxConcurrent = 1; taskTimeoutMinutes = 45; bots = @($bots) }
+$config = [ordered]@{ version = 1; repoPath = $RepoPath; stateDir = $stateDir; worktreesRoot = $worktreesRoot; codexCommand = $codex; allowedTeamId = $team; allowedUserIds = @($users); allowedChannelIds = @($channels); maxConcurrent = 1; taskTimeoutMinutes = 45; bots = @($bots) }
 Write-PrivateJson (Join-Path $privateRoot 'secrets.json') $secrets
 Write-PrivateJson (Join-Path $privateRoot 'runtime.json') @{ nodeCommand = $node }
 Write-PrivateJson $configPath $config

@@ -1,6 +1,22 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Read-IdentifierList([string]$Label, [string]$Pattern) {
+    while ($true) {
+        $values = @((Read-Host $Label).Split(',') | ForEach-Object { $_.Trim() } | Select-Object -Unique)
+        if ($values.Count -gt 0 -and @($values | Where-Object { $_ -cnotmatch $Pattern }).Count -eq 0) { return ,$values }
+        Write-Host 'Use exact Slack IDs, separated by commas. Names and workspace URLs are not IDs.' -ForegroundColor Yellow
+    }
+}
+
+function Read-SlackWorkspaceId {
+    while ($true) {
+        $values = Read-IdentifierList 'Workspace ID (T...)' '^T[A-Z0-9]+$'
+        if ($values.Count -eq 1) { return [string]$values[0] }
+        Write-Host 'Configure exactly one Slack workspace.' -ForegroundColor Yellow
+    }
+}
+
 function Get-EnigmaHome {
     if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is unavailable. Run as your signed-in Windows user.' }
     return Join-Path $env:LOCALAPPDATA 'EnigmaAgents'
