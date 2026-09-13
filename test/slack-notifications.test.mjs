@@ -58,3 +58,36 @@ test('notification allowlist is copied rather than changed by caller array mutat
   await assert.rejects(connection.post({ channel: 'CREVIEW', text: 'Notice', notifyUserId: 'UOTHER' }), /notification_user_not_allowed/);
   assert.equal(calls.length, 0);
 });
+
+test('validated PR link enables one controlled link with or without an owner mention', async () => {
+  const { connection, calls } = fixture(['UOWNER']);
+  const prUrl = 'https://github.com/owner/repo/pull/12';
+  const text = 'Review <@UOTHER> <!channel> <https://example.test|bad> & done';
+  await connection.post({ channel: 'CREVIEW', text, prUrl });
+  await connection.post({ channel: 'CREVIEW', text, prUrl, notifyUserId: 'UOWNER' });
+  for (const { body } of calls) {
+    assert.equal(body.mrkdwn, true);
+    assert.equal(body.parse, 'none');
+    assert.equal(body.link_names, false);
+    assert.ok(body.text.endsWith(`\n\n<${prUrl}|Open pull request>`));
+    assert.match(body.text, /&lt;@UOTHER&gt; &lt;!channel&gt; &lt;https:\/\/example.test\|bad&gt; &amp; done/);
+    assert.equal((body.text.match(/<https:/g) || []).length, 1);
+  }
+  assert.equal(calls[0].body.text.includes('<@'), false);
+  assert.ok(calls[1].body.text.startsWith('<@UOWNER>\n'));
+});
+
+test('unsafe PR URLs fail before the Slack API request', async () => {
+  const { connection, calls } = fixture(['UOWNER']);
+  const unsafe = [
+    'http://github.com/owner/repo/pull/1', 'https://github.com.evil.test/owner/repo/pull/1',
+    'https://secret@github.com/owner/repo/pull/1', 'https://github.com/owner/repo/pull/1?token=secret',
+    'https://github.com/owner/repo/pull/1#comment', 'https://github.com/owner/../pull/1',
+    'https://github.com/owner/repo/pull/1\n', 'https://github.com/owner/repo/pull/1|click><!channel>',
+    '', 123,
+  ];
+  for (const prUrl of unsafe) {
+    await assert.rejects(connection.post({ channel: 'CREVIEW', text: 'Notice', notifyUserId: 'UOWNER', prUrl }), /invalid_pull_request_url/);
+  }
+  assert.equal(calls.length, 0);
+});

@@ -173,11 +173,16 @@ test('populated legacy outbox migrates once and preserves delivery state and new
     const store = new TaskStore(path);
     try {
       assert.equal(store.db.prepare('PRAGMA table_info(outbox)').all().filter(column => column.name === 'notifyUserId').length, 1);
+      assert.equal(store.db.prepare('PRAGMA table_info(outbox)').all().filter(column => column.name === 'prUrl').length, 1);
       const rows = store.db.prepare("SELECT * FROM outbox WHERE id IN ('pending-old', 'delivered-old') ORDER BY sequence").all();
-      assert.deepEqual(rows.map(({ notifyUserId, ...row }) => row), before.map(row => ({ ...row })));
-      assert.ok(rows.every(row => row.notifyUserId === null));
-      if (attempt === 0) store.addOutbox({ botKey: 'atlas', channel: 'C456', text: 'New notice', notifyUserId: 'UOWNER' });
-      else assert.equal(store.db.prepare("SELECT notifyUserId FROM outbox WHERE channel = 'C456'").get().notifyUserId, 'UOWNER');
+      assert.deepEqual(rows.map(({ notifyUserId, prUrl, ...row }) => row), before.map(row => ({ ...row })));
+      assert.ok(rows.every(row => row.notifyUserId === null && row.prUrl === null));
+      if (attempt === 0) store.addOutbox({ botKey: 'atlas', channel: 'C456', text: 'New notice', notifyUserId: 'UOWNER', prUrl: 'https://github.com/owner/repo/pull/1' });
+      else {
+        const notice = store.db.prepare("SELECT notifyUserId, prUrl FROM outbox WHERE channel = 'C456'").get();
+        assert.equal(notice.notifyUserId, 'UOWNER');
+        assert.equal(notice.prUrl, 'https://github.com/owner/repo/pull/1');
+      }
     } finally { store.close(); }
   }
 });
@@ -191,6 +196,39 @@ test('outbox only accepts null or a valid notification user ID', (t) => {
     assert.throws(() => store.addOutbox({ ...message, notifyUserId }), /Invalid outbox notification/);
   }
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM outbox').get().count, 2);
+});
+
+test('recipient-enabled outbox schema upgrades without changing a pending owner notification', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'enigma-link-migrate-'));
+  const path = join(root, 'tasks.db');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const old = new DatabaseSync(path);
+  old.exec(`CREATE TABLE outbox (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, taskId TEXT,
+    botKey TEXT NOT NULL, channel TEXT NOT NULL, threadTs TEXT, notifyUserId TEXT, text TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL, deliveredAt INTEGER, nextAttemptAt INTEGER NOT NULL
+  ); INSERT INTO outbox VALUES (1, 'owner-notice', NULL, 'atlas', 'C123', NULL, 'UOWNER', 'Awaiting delivery', 2, 100, NULL, 200);`);
+  old.close();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const store = new TaskStore(path);
+    try {
+      const row = store.db.prepare("SELECT * FROM outbox WHERE id = 'owner-notice'").get();
+      assert.equal(row.notifyUserId, 'UOWNER');
+      assert.equal(row.prUrl, null);
+      assert.equal(row.text, 'Awaiting delivery');
+      assert.equal(row.attempts, 2);
+      assert.equal(row.nextAttemptAt, 200);
+    } finally { store.close(); }
+  }
+});
+
+test('outbox rejects unsafe pull request link metadata', (t) => {
+  const store = fixture(t)();
+  const message = { botKey: 'atlas', channel: 'C123', text: 'Notice' };
+  for (const prUrl of ['https://github.com/owner/repo/pull/1?token=secret', 'https://secret@github.com/owner/repo/pull/1', 'https://github.com/owner/../pull/1', 'https://github.com/owner/repo/pull/1\n', '<!channel>', 123]) {
+    assert.throws(() => store.addOutbox({ ...message, prUrl }), /Invalid outbox pull request URL/);
+  }
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM outbox').get().count, 0);
 });
 
 test('queued project identity survives reopen, deduplication, and rejects mutation or invalid input', (t) => {

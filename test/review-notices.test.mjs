@@ -40,7 +40,8 @@ test('queues a durable notice without tokens or creating coding tasks; repeats d
     assert.equal(messages[0].botKey, 'atlas');
     assert.equal(messages[0].taskId, null);
     assert.match(messages[0].text, /Review received/);
-    assert.match(messages[0].text, /https:\/\/github.com\/owner\/repo\/pull\/1$/);
+    assert.equal(messages[0].prUrl, input.prUrl);
+    assert.equal(messages[0].text.includes(input.prUrl), false);
     assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM review_notices').get().count, 1);
   });
 });
@@ -131,11 +132,11 @@ test('notice and outbox row roll back together after insertion failure, allowing
   assert.equal(result.status, 'queued');
   assert.equal(result.messages, 1);
   inspect(store => {
-    const messages = store.db.prepare('SELECT text FROM outbox ORDER BY sequence').all();
+    const messages = store.db.prepare('SELECT text, prUrl FROM outbox ORDER BY sequence').all();
     assert.ok(messages.every(message => Array.from(message.text).length <= 3500));
     assert.ok(messages[0].text.includes('&'.repeat(3000)));
     assert.equal(messages[0].text.includes('&amp;'), false);
-    assert.match(messages.at(-1).text, /https:\/\/github.com\/owner\/repo\/pull\/1$/);
+    assert.equal(messages.at(-1).prUrl, input.prUrl);
   });
 });
 

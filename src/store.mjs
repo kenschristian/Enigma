@@ -49,6 +49,7 @@ export class TaskStore {
         channel TEXT NOT NULL,
         threadTs TEXT,
         notifyUserId TEXT,
+        prUrl TEXT,
         text TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,
         createdAt INTEGER NOT NULL,
@@ -59,11 +60,14 @@ export class TaskStore {
         WHERE deliveredAt IS NULL;
     `);
     // Serialize discovery and migration with other runner/helper processes.
-    // Existing queued messages retain every field and receive a null recipient.
+    // Existing queued messages retain every field; new metadata defaults to null.
     this.transaction(() => {
       const columns = this.db.prepare('PRAGMA table_info(outbox)').all();
       if (!columns.some(column => column.name === 'notifyUserId')) {
         this.db.exec('ALTER TABLE outbox ADD COLUMN notifyUserId TEXT');
+      }
+      if (!columns.some(column => column.name === 'prUrl')) {
+        this.db.exec('ALTER TABLE outbox ADD COLUMN prUrl TEXT');
       }
     });
   }
@@ -180,17 +184,20 @@ export class TaskStore {
     });
   }
 
-  addOutbox({ taskId = null, botKey, channel, threadTs = null, text, notifyUserId = null }) {
+  addOutbox({ taskId = null, botKey, channel, threadTs = null, text, notifyUserId = null, prUrl = null }) {
     for (const value of [botKey, channel, text]) {
       if (typeof value !== 'string' || !value) throw new Error('Invalid outbox message');
     }
     if (notifyUserId !== null && (typeof notifyUserId !== 'string' || !/^[UW][A-Z0-9]+$/.test(notifyUserId))) {
       throw new Error('Invalid outbox notification user');
     }
+    if (prUrl !== null && (typeof prUrl !== 'string' || prUrl.trim() !== prUrl || !/^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!(?:\.|\.\.)\/)[A-Za-z0-9_.-]{1,100}\/pull\/[1-9][0-9]{0,19}$/.test(prUrl))) {
+      throw new Error('Invalid outbox pull request URL');
+    }
     const id = randomUUID();
     const now = Date.now();
-    this.db.prepare(`INSERT INTO outbox (id, taskId, botKey, channel, threadTs, text, notifyUserId, createdAt, nextAttemptAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, taskId, botKey, channel, threadTs, text, notifyUserId, now, now);
+    this.db.prepare(`INSERT INTO outbox (id, taskId, botKey, channel, threadTs, text, notifyUserId, prUrl, createdAt, nextAttemptAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, taskId, botKey, channel, threadTs, text, notifyUserId, prUrl, now, now);
     return { ...this.db.prepare('SELECT * FROM outbox WHERE id = ?').get(id) };
   }
 

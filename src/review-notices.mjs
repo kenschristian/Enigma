@@ -99,7 +99,7 @@ export async function queueReviewNotice({ config, ...payload }, { env = process.
   if (originRepository(origin) !== pr.repo) fail('Pull request repository does not match configured origin.');
   const botKey = atlasBots[0].key;
   const text = redactNotice(payload.text.trim(), env);
-  const messages = splitMessage(`${labels[payload.kind]}\n\n${text}\n\n${pr.url}`);
+  const messages = splitMessage(`${labels[payload.kind]}\n\n${text}`);
   const fingerprint = digest(JSON.stringify({
     noticeId: payload.noticeId, prUrl: pr.url, kind: payload.kind, text: payload.text,
     channel: payload.channel, notifyUserId: payload.notifyUserId ?? null, botKey, teamId: settings.allowedTeamId, projectKey: project.key,
@@ -121,6 +121,7 @@ export async function queueReviewNotice({ config, ...payload }, { env = process.
       }
       const ids = messages.map((text, index) => store.addOutbox({
         botKey, channel: payload.channel, text, notifyUserId: index === 0 ? payload.notifyUserId ?? null : null,
+        prUrl: index === messages.length - 1 ? pr.url : null,
       }).id);
       store.db.prepare('INSERT INTO review_notices (notice_id, fingerprint, created_at, message_ids) VALUES (?, ?, ?, ?)')
         .run(payload.noticeId, fingerprint, Date.now(), JSON.stringify(ids));
