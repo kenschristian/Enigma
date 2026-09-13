@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TaskStore } from '../src/store.mjs';
+import { DatabaseSync } from 'node:sqlite';
 
 test('Slack retry-after delays persist and conversation ordering does not depend on timestamps', () => {
   const store = new TaskStore(':memory:');
@@ -152,4 +153,63 @@ test('outbox groups messages without a Slack thread into the same destination', 
   assert.deepEqual(store.pendingOutbox().map(message => message.id), [first.id]);
   store.markDelivered(first.id);
   assert.deepEqual(store.pendingOutbox().map(message => message.id), [second.id]);
+});
+
+test('populated legacy outbox migrates once and preserves delivery state and new recipients across reopen', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'enigma-migrate-'));
+  const path = join(root, 'tasks.db');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const old = new DatabaseSync(path);
+  old.exec(`CREATE TABLE outbox (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, taskId TEXT,
+    botKey TEXT NOT NULL, channel TEXT NOT NULL, threadTs TEXT, text TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL, deliveredAt INTEGER, nextAttemptAt INTEGER NOT NULL
+  );
+  INSERT INTO outbox VALUES (7, 'pending-old', 'task-old', 'atlas', 'C123', '1.23', 'Saved pending text', 3, 100, NULL, 12345);
+  INSERT INTO outbox VALUES (8, 'delivered-old', NULL, 'atlas', 'C123', NULL, 'Saved delivered text', 1, 101, 200, 0);`);
+  const before = old.prepare('SELECT * FROM outbox ORDER BY sequence').all();
+  old.close();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const store = new TaskStore(path);
+    try {
+      assert.equal(store.db.prepare('PRAGMA table_info(outbox)').all().filter(column => column.name === 'notifyUserId').length, 1);
+      const rows = store.db.prepare("SELECT * FROM outbox WHERE id IN ('pending-old', 'delivered-old') ORDER BY sequence").all();
+      assert.deepEqual(rows.map(({ notifyUserId, ...row }) => row), before.map(row => ({ ...row })));
+      assert.ok(rows.every(row => row.notifyUserId === null));
+      if (attempt === 0) store.addOutbox({ botKey: 'atlas', channel: 'C456', text: 'New notice', notifyUserId: 'UOWNER' });
+      else assert.equal(store.db.prepare("SELECT notifyUserId FROM outbox WHERE channel = 'C456'").get().notifyUserId, 'UOWNER');
+    } finally { store.close(); }
+  }
+});
+
+test('outbox only accepts null or a valid notification user ID', (t) => {
+  const store = fixture(t)();
+  const message = { botKey: 'atlas', channel: 'C123', text: 'Notice' };
+  assert.equal(store.addOutbox(message).notifyUserId, null);
+  assert.equal(store.addOutbox({ ...message, notifyUserId: 'UOWNER' }).notifyUserId, 'UOWNER');
+  for (const notifyUserId of ['', 123, '<!channel>', 'UOWNER>']) {
+    assert.throws(() => store.addOutbox({ ...message, notifyUserId }), /Invalid outbox notification/);
+  }
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM outbox').get().count, 2);
+});
+
+test('queued project identity survives reopen, deduplication, and rejects mutation or invalid input', (t) => {
+  const open = fixture(t);
+  const store = open();
+  const projectIdentity = '["enigma","C:/repos/enigma"]';
+  const task = store.enqueue({ ...input('identity'), projectIdentity }).task;
+  const legacy = store.enqueue(input('legacy', 'other')).task;
+  // Model a task written by the prior schema, before the optional JSON field existed.
+  delete legacy.projectIdentity;
+  store.db.prepare('UPDATE tasks SET data = ? WHERE id = ?').run(JSON.stringify(legacy), legacy.id);
+  store.close();
+  const reopened = open();
+  assert.equal(reopened.get(task.id).projectIdentity, projectIdentity);
+  assert.equal(reopened.nextQueued().projectIdentity, projectIdentity);
+  assert.equal(reopened.get(legacy.id).projectIdentity, null);
+  assert.equal(reopened.enqueue({ ...input('identity'), projectIdentity: 'different' }).task.projectIdentity, projectIdentity);
+  assert.throws(() => reopened.update(task.id, { projectIdentity: 'different' }), /cannot be updated/);
+  for (const projectIdentity of [null, 123, '', ' ', 'x'.repeat(1025)]) {
+    assert.throws(() => reopened.enqueue({ ...input('invalid'), projectIdentity }), /Invalid task project identity/);
+  }
 });

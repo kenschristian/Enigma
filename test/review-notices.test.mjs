@@ -105,21 +105,20 @@ test('redacts credentials, constrains mentions, and leaves command-like content 
   inspect(store => {
     assert.equal(store.list().length, 0);
     const [message] = store.pendingOutbox();
-    assert.match(message.text, /^<@UOWNER>/);
+    assert.equal(message.notifyUserId, 'UOWNER');
+    assert.doesNotMatch(message.text, /<@/);
     assert.match(message.text, /resume TASK-ID/);
     assert.doesNotMatch(message.text, /ghp_|xoxb-|secret/);
     assert.match(message.text, /\[redacted\]/);
   });
 });
 
-test('notice and every outbox chunk roll back together on persistence failure, allowing retry', async (t) => {
+test('notice and outbox row roll back together after insertion failure, allowing retry', async (t) => {
   const { queue, inspect } = fixture(t);
   class FailingStore extends TaskStore {
     addOutbox(message) {
-      const result = super.addOutbox(message);
-      if (this.inserted) throw new Error('Injected second-insert failure');
-      this.inserted = true;
-      return result;
+      super.addOutbox(message);
+      throw new Error('Injected post-insert failure');
     }
   }
   const text = '&'.repeat(3000);
@@ -130,10 +129,12 @@ test('notice and every outbox chunk roll back together on persistence failure, a
   });
   const result = await queue({ text });
   assert.equal(result.status, 'queued');
-  assert.ok(result.messages > 1);
+  assert.equal(result.messages, 1);
   inspect(store => {
     const messages = store.db.prepare('SELECT text FROM outbox ORDER BY sequence').all();
     assert.ok(messages.every(message => Array.from(message.text).length <= 3500));
+    assert.ok(messages[0].text.includes('&'.repeat(3000)));
+    assert.equal(messages[0].text.includes('&amp;'), false);
     assert.match(messages.at(-1).text, /https:\/\/github.com\/owner\/repo\/pull\/1$/);
   });
 });

@@ -98,9 +98,8 @@ export async function queueReviewNotice({ config, ...payload }, { env = process.
   } catch { fail('Cannot verify the configured repository origin.'); }
   if (originRepository(origin) !== pr.repo) fail('Pull request repository does not match configured origin.');
   const botKey = atlasBots[0].key;
-  const text = redactNotice(payload.text.trim(), env).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const mention = payload.notifyUserId ? `<@${payload.notifyUserId}>\n` : '';
-  const messages = splitMessage(`${mention}${labels[payload.kind]}\n\n${text}\n\n${pr.url}`);
+  const text = redactNotice(payload.text.trim(), env);
+  const messages = splitMessage(`${labels[payload.kind]}\n\n${text}\n\n${pr.url}`);
   const fingerprint = digest(JSON.stringify({
     noticeId: payload.noticeId, prUrl: pr.url, kind: payload.kind, text: payload.text,
     channel: payload.channel, notifyUserId: payload.notifyUserId ?? null, botKey, teamId: settings.allowedTeamId, projectKey: project.key,
@@ -120,7 +119,9 @@ export async function queueReviewNotice({ config, ...payload }, { env = process.
         if (previous.fingerprint !== fingerprint) fail('Notice ID already exists with different content.');
         return { status: 'deduplicated', ...summary, messages: JSON.parse(previous.message_ids).length };
       }
-      const ids = messages.map(text => store.addOutbox({ botKey, channel: payload.channel, text }).id);
+      const ids = messages.map((text, index) => store.addOutbox({
+        botKey, channel: payload.channel, text, notifyUserId: index === 0 ? payload.notifyUserId ?? null : null,
+      }).id);
       store.db.prepare('INSERT INTO review_notices (notice_id, fingerprint, created_at, message_ids) VALUES (?, ?, ?, ?)')
         .run(payload.noticeId, fingerprint, Date.now(), JSON.stringify(ids));
       return { status: 'queued', ...summary, messages: ids.length };
