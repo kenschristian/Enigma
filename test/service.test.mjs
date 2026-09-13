@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { TaskStore } from '../src/store.mjs';
 import { AgentService } from '../src/service.mjs';
 
-const config = {allowedTeamId:'T1',allowedUserIds:['U1'],allowedChannelIds:['C1'],maxConcurrent:1,taskTimeoutMinutes:1};
+const config = {allowedTeamId:'T1',allowedUserIds:['U1'],allowedChannelIds:['C1'],bots:[{key:'atlas',role:'atlas'}],maxConcurrent:1,taskTimeoutMinutes:1};
 const connection = {bot:{key:'atlas',role:'atlas'},botUserId:'UBOT'};
 const event = (id, text, thread='1.1', user='U1') => ({type:'event_callback',team_id:'T1',event_id:id,event:{type:'app_mention',user,channel:'C1',text:`<@UBOT> ${text}`,ts:`${id.replace(/\D/g,'')||1}.1`,thread_ts:thread}});
 function fixture(options = {}) {
@@ -45,7 +45,7 @@ test('same conversation serializes while unrelated tasks run concurrently',async
 });
 test('restart marks running work interrupted and pauses follow-ups until explicit resume',async()=>{
   const {store,service,calls}=fixture();
-  service.receive(event('E1','one'),connection);const original=store.list()[0];store.update(original.id,{status:'running',codexThreadId:'saved-thread'});
+  service.receive(event('E1','one'),connection);const original=store.list()[0];store.update(original.id,{status:'running',codexThreadId:'saved-thread',worktreePath:`C:/work/${original.conversationKey}`,branch:'codex/test'});
   service.receive(event('E2','two'),connection);
   service.start();await delay(5);
   assert.equal(store.get(original.id).status,'interrupted');assert.equal(calls.length,0);

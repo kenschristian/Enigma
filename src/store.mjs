@@ -155,6 +155,10 @@ export class TaskStore {
       this.db.prepare('UPDATE tasks SET status = ?, data = ? WHERE id = ?').run(task.status, JSON.stringify(task), id);
       if (metadata.some((field) => field in patch)) {
         const saved = decode(this.db.prepare('SELECT data FROM conversations WHERE conversation_key = ?').get(task.conversationKey)) ?? {};
+        if (saved.projectIdentity && task.projectIdentity && saved.projectIdentity !== task.projectIdentity) {
+          throw Object.assign(new Error('Saved conversation belongs to another project.'), { code: 'PROJECT_MAPPING_CHANGED' });
+        }
+        saved.projectIdentity = task.projectIdentity ?? saved.projectIdentity ?? null;
         for (const field of metadata) if (field in patch) saved[field] = patch[field];
         this.db.prepare(`INSERT INTO conversations (conversation_key, data) VALUES (?, ?)
           ON CONFLICT(conversation_key) DO UPDATE SET data = excluded.data`).run(task.conversationKey, JSON.stringify(saved));
@@ -167,7 +171,10 @@ export class TaskStore {
     const latest = decodeTask(this.db.prepare('SELECT data FROM tasks WHERE conversation_key = ? ORDER BY sequence DESC LIMIT 1').get(key));
     if (!latest) return null;
     const saved = decode(this.db.prepare('SELECT data FROM conversations WHERE conversation_key = ?').get(key));
-    return Object.assign(latest, saved);
+    // The newest queued task may belong to a newly mapped project. Its identity
+    // must not relabel metadata saved by an earlier task. Older metadata remains
+    // explicitly unbound until its exact worktree has been checked by the service.
+    return Object.assign(latest, saved, { projectIdentity: saved ? saved.projectIdentity ?? null : latest.projectIdentity });
   }
 
   recoverInterrupted() {

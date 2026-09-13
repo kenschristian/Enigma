@@ -251,3 +251,19 @@ test('queued project identity survives reopen, deduplication, and rejects mutati
     assert.throws(() => reopened.enqueue({ ...input('invalid'), projectIdentity }), /Invalid task project identity/);
   }
 });
+
+test('conversation metadata retains its project binding across later queued tasks, reopen and rejected writes', (t) => {
+  const open = fixture(t);
+  const store = open();
+  const first = store.enqueue({ ...input('first'), projectIdentity: 'project-one' }).task;
+  store.update(first.id, { codexThreadId: 'thread-one', worktreePath: '/work/one', branch: 'codex/one' });
+  const second = store.enqueue({ ...input('second'), projectIdentity: 'project-two' }).task;
+  store.close();
+  const reopened = open();
+  assert.equal(reopened.conversation('conversation').projectIdentity, 'project-one');
+  assert.equal(reopened.get(second.id).projectIdentity, 'project-two');
+  assert.throws(() => reopened.update(second.id, { worktreePath: '/work/two', branch: 'codex/two' }), /another project/);
+  assert.equal(reopened.conversation('conversation').codexThreadId, 'thread-one');
+  assert.equal(reopened.conversation('conversation').worktreePath, '/work/one');
+  assert.equal(reopened.get(second.id).worktreePath, '/work/one');
+});
