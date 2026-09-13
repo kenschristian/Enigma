@@ -73,3 +73,5 @@ try {
         if (Test-Path -LiteralPath $directory) { [IO.Directory]::Delete($directory, $false) }
     }
 }
+# Expected child failures above must not become the CI wrapper's final exit code.
+exit 0
