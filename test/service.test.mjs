@@ -12,6 +12,7 @@ function fixture(options = {}) {
   const calls = [];
   const service = new AgentService({ config:{...config,...options.config},store,
     worktrees:{ensure:async key=>({path:`C:/work/${key}`,branch:'codex/test'})},
+    worktreesFor:options.worktreesFor,
     clientFactory:options.clientFactory || (()=>({start:async()=>{},close:async()=>{},run:async params=>{calls.push(params);await params.onThread('thread-1');return {status:'completed',text:'Done',threadId:'thread-1'};}})),
     connections:options.connections || new Map() });
   return {store,service,calls};
@@ -77,4 +78,26 @@ test('results are saved before delivery and failed delivery retries without reru
   service.receive(event('E1','one'),connection);service.pump();await drained(service);
   assert.equal(store.list()[0].result,'Done');await service.flush();service.pump();await drained(service);
   assert.equal(calls.length,1);assert.equal(store.list()[0].status,'completed');store.close();
+});
+
+test('project channels choose their own repository and keep saved conversations separate',async()=>{
+  const selected=[],calls=[];
+  const {store,service}=fixture({config:{allowedChannelIds:['C1','C2']},
+    worktreesFor:task=>({ensure:async key=>{selected.push({channel:task.channel,key});return {path:`C:/work/${task.channel}`,branch:`codex/${task.channel}`};}}),
+    clientFactory:task=>({start:async()=>{},close:async()=>{},run:async params=>{calls.push({...params,channel:task.channel});params.onThread(`saved-${task.channel}`);return {status:'completed',text:'Done'};}})});
+  service.receive(event('E1','Enigma work'),connection);
+  const jarvis=event('E2','Jarvis work');jarvis.event.channel='C2';
+  service.receive(jarvis,connection);service.pump();await drained(service);service.pump();await drained(service);
+  const followup=event('E3','Continue Jarvis');followup.event.channel='C2';
+  service.receive(followup,connection);service.pump();await drained(service);
+  assert.deepEqual(calls.map(c=>c.cwd),['C:/work/C1','C:/work/C2','C:/work/C2']);
+  assert.equal(calls[1].threadId,undefined);assert.equal(calls[2].threadId,'saved-C2');
+  assert.notEqual(selected[0].key,selected[1].key);store.close();
+});
+
+test('an unavailable project mapping fails before any Codex client starts',async()=>{
+  let constructed=false;
+  const {store,service}=fixture({worktreesFor:()=>{throw new Error('Project unavailable');},clientFactory:()=>{constructed=true;}});
+  service.receive(event('E1','work'),connection);service.pump();await drained(service);
+  assert.equal(constructed,false);assert.equal(store.list()[0].status,'failed');store.close();
 });

@@ -4,7 +4,7 @@ Every completed repository change is delivered as a pull request marked **Ready 
 
 ## Private project channels
 
-Atlas manages the following channel layout using private configuration and verified Slack channel IDs. Rename the existing private `#enigma-agents` channel to `#enigma-work` so its history and conversations remain available; create the other channels privately. Configuration changes and actual channel provisioning are separate from this document and require observed setup results before being reported complete.
+Atlas manages the following channel layout using private configuration and verified Slack channel IDs. The existing private `#enigma-agents` channel was renamed to `#enigma-work`, preserving its history and conversations. Jarvis uses the corresponding `#jarvis-work`, `#jarvis-pull-requests`, `#jarvis-code-review`, and `#jarvis-updates` destinations. Configuration changes and actual channel provisioning are separate from this document and require observed setup results before being reported complete.
 
 | Channel | Purpose |
 | --- | --- |

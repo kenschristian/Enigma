@@ -1,7 +1,9 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import path from 'node:path';
 import { MODEL, ROLES, redact } from './config.mjs';
 import { roleInstructions, agentConfig } from './roles.mjs';
 import { splitMessage } from './slack.mjs';
+import { projectIdentity } from './projects.mjs';
 
 const aliases = { atlas: 'atlas', nova: 'frontend', frontend: 'frontend', forge: 'backend', backend: 'backend', bridge: 'api', api: 'api' };
 const HELP = 'Mention this bot with a task. Atlas coordinates Nova, Forge and Bridge. Use "nova: task", "forge: task" or "bridge: task" to work with one specialist. Mention the bot in the same Slack thread to continue. Controls: help, status, resume TASK-ID, cancel TASK-ID. Restarted tasks are saved and require resume; messages sent while this PC is offline may need resending.';
@@ -21,12 +23,14 @@ export function routeEvent(payload, connection, config) {
   if (prefix && role === 'atlas') { role = aliases[prefix[1].toLowerCase()]; prompt = prompt.slice(prefix[0].length); }
   const slackThreadTs = e.thread_ts || e.ts;
   return { eventId: `${connection.bot.key}:${payload.event_id}`, conversationKey: `${payload.team_id}:${e.channel}:${slackThreadTs}:${role}`,
-    role, prompt: prompt.trim(), channel: e.channel, slackThreadTs, userId: e.user, teamId: payload.team_id, botKey: connection.bot.key };
+    role, prompt: prompt.trim(), channel: e.channel, slackThreadTs, userId: e.user, teamId: payload.team_id, botKey: connection.bot.key,
+    ...(config.repoPath ? { projectIdentity: projectIdentity(config, e.channel) } : {}) };
 }
 
 export class AgentService {
-  constructor({ config, store, worktrees, clientFactory, connections = new Map(), log = () => {} }) {
+  constructor({ config, store, worktrees, worktreesFor = () => worktrees, clientFactory, connections = new Map(), log = () => {} }) {
     Object.assign(this, { config, store, worktrees, clientFactory, connections, log });
+    this.worktreesFor = worktreesFor;
     this.active = new Map(); this.stopping = false; this.flushing = false;
   }
 
@@ -112,8 +116,30 @@ export class AgentService {
     let client;
     let approvalNeeded = false;
     try {
-      client = this.clientFactory();
-      const worktree = await this.worktrees.ensure(task.conversationKey);
+      let verifyLegacyWorktree = false;
+      if (this.config.repoPath) {
+        const expected = projectIdentity(this.config, task.channel);
+        const legacy = projectIdentity({ ...this.config, projects: undefined }, task.channel);
+        const bound = task.projectIdentity === expected;
+        // Older tasks have no recorded project binding. Reuse only their already
+        // established worktree in the legacy repository; never guess for queued work.
+        const establishedLegacy = !task.projectIdentity && task.worktreePath && task.branch &&
+          JSON.parse(expected)[1] === JSON.parse(legacy)[1];
+        verifyLegacyWorktree = !!establishedLegacy;
+        if (!bound && !establishedLegacy) {
+          const error = new Error('The saved task repository mapping changed.');
+          error.code = 'PROJECT_MAPPING_CHANGED';
+          throw error;
+        }
+      }
+      const worktree = await this.worktreesFor(task).ensure(task.conversationKey);
+      if (verifyLegacyWorktree) {
+        const canonical = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+        if (worktree.branch !== task.branch || canonical(worktree.path) !== canonical(task.worktreePath)) {
+          throw Object.assign(new Error('Legacy task worktree does not match saved work.'), { code: 'PROJECT_MAPPING_CHANGED' });
+        }
+      }
+      client = this.clientFactory(task);
       this.store.update(task.id, { worktreePath: worktree.path, branch: worktree.branch });
       const previous = this.store.conversation(task.conversationKey);
       if (signal.aborted) return;
@@ -138,7 +164,9 @@ export class AgentService {
         const status = this.stopping || signal.aborted || approvalNeeded ? 'interrupted' : 'failed';
         const safe = /^[A-Z_a-z0-9-]{1,60}$/.test(error?.code || '') ? error.code : 'TASK_FAILED';
         this.store.update(task.id, { status, error: safe });
-        this.reply(task, `Task ${task.id} ${status} (${safe}). Saved files are preserved. Check Codex sign-in and use resume ${task.id} after resolving the issue.`);
+        this.reply(task, safe === 'PROJECT_MAPPING_CHANGED'
+          ? `Task ${task.id} stopped because its saved repository binding no longer matches this channel. Saved files are preserved. Restore the original project mapping, or start a new task in the correct project channel after reviewing the saved work.`
+          : `Task ${task.id} ${status} (${safe}). Saved files are preserved. Check Codex sign-in and use resume ${task.id} after resolving the issue.`);
       }
     } finally {
       try { await client?.close(); }
@@ -153,7 +181,7 @@ export class AgentService {
       for (const message of this.store.pendingOutbox()) {
         const connection = this.connections.get(message.botKey);
         if (!connection) continue;
-        try { await connection.post({ channel: message.channel, threadTs: message.threadTs, text: message.text, id: message.id }); this.store.markDelivered(message.id); }
+        try { await connection.post({ channel: message.channel, threadTs: message.threadTs, text: message.text, id: message.id, notifyUserId: message.notifyUserId }); this.store.markDelivered(message.id); }
         catch (error) { this.store.failDelivery(message.id, (error.retryAfter || 0) * 1000); break; }
       }
     } catch { this.log('Message delivery paused; retrying.'); }

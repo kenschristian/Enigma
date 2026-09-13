@@ -1,6 +1,6 @@
 # Enigma
 
-Enigma connects a private Slack channel to the installed Codex app-server on your Windows computer. You send a request to Atlas; work runs in an isolated Git worktree using your existing ChatGPT subscription sign-in. There are no npm runtime dependencies or OpenAI API keys.
+Enigma connects private project Slack channels to the installed Codex app-server on your Windows computer. You send a request to Atlas; work runs in the channel's assigned repository and an isolated Git worktree using your existing ChatGPT subscription sign-in. There are no npm runtime dependencies or OpenAI API keys.
 
 Start with **[Windows setup](docs/SETUP.md)**. Slack workspace: [enigma777](https://enigma777.slack.com). Repository: [kenschristian/Enigma](https://github.com/kenschristian/Enigma).
 
@@ -16,6 +16,8 @@ Start with **[Windows setup](docs/SETUP.md)**. Slack workspace: [enigma777](http
 ```
 
 Use a real Slack mention in an explicitly allowed channel. These are ordinary messages, not slash commands. Atlas is the default identity; separate Nova, Forge, and Bridge apps are optional. Runtime roles are `frontend`, `backend`, and `api`.
+
+Use **#enigma-work** for this bridge and **#jarvis-work** for Jarvis. Each project also has private `-pull-requests`, `-code-review`, and `-updates` channels. The [team prompt](docs/SLACK-TEAM-PROMPT.md) explains their purposes. Completed changes receive one initial Greptile review; agents fix valid findings and run required checks, then tag you for Merge without requesting another Greptile pass. The [review workflow](docs/REVIEW-WORKFLOW.md) and separately activated [Codex monitor](docs/REVIEW-MONITOR.md) govern that handoff.
 
 The bridge checks the workspace, sender, and channel before accepting work. Bot messages and duplicate events are ignored. Workspaces and incomplete changes are retained after interruptions. Escalation requests are never automatically approved. Specialists prepare work for Atlas to review; the human clicks the final GitHub **Merge** action.
 
