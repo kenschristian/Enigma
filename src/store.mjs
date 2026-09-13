@@ -104,6 +104,16 @@ export class TaskStore {
       ) ORDER BY queued.sequence LIMIT 1`).get());
   }
 
+  interruptedTask(conversationKey, exceptId = '') {
+    return decode(this.db.prepare("SELECT data FROM tasks WHERE conversation_key = ? AND status = 'interrupted' AND id != ? ORDER BY sequence LIMIT 1").get(conversationKey, exceptId));
+  }
+
+  hasLaterActiveTask(id) {
+    return !!this.db.prepare(`SELECT 1 FROM tasks newer JOIN tasks original
+      ON newer.conversation_key = original.conversation_key AND newer.sequence > original.sequence
+      WHERE original.id = ? AND newer.status NOT IN ('cancelled', 'failed') LIMIT 1`).get(id);
+  }
+
   update(id, patch) {
     for (const field of Object.keys(patch)) {
       if (!mutable.has(field)) throw new Error(`Task field cannot be updated: ${field}`);
@@ -180,10 +190,11 @@ export class TaskStore {
     this.db.prepare('UPDATE outbox SET deliveredAt = ? WHERE id = ? AND deliveredAt IS NULL').run(Date.now(), id);
   }
 
-  failDelivery(id) {
+  failDelivery(id, minimumDelayMs = 0) {
+    const minimum = Math.max(0, Math.min(300000, Number(minimumDelayMs) || 0));
     this.db.prepare(`UPDATE outbox SET attempts = attempts + 1,
-      nextAttemptAt = ? + MIN(300000, 1000 * (1 << MIN(attempts, 9)))
-      WHERE id = ? AND deliveredAt IS NULL`).run(Date.now(), id);
+      nextAttemptAt = ? + MAX(?, MIN(300000, 1000 * (1 << MIN(attempts, 9))))
+      WHERE id = ? AND deliveredAt IS NULL`).run(Date.now(), minimum, id);
   }
 
   close() {

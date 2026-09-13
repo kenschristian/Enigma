@@ -19,6 +19,7 @@ Export `TaskStore(path)` using node:sqlite. Synchronous methods:
 - `recoverInterrupted()` changes running tasks to interrupted and returns count. Queued tasks remain queued.
 - `addOutbox({taskId?, botKey, channel, threadTs, text})`, `pendingOutbox(limit=20)`, `markDelivered(id)`, `failDelivery(id)` retry accounting. Durable messages, no unbounded parallel sends.
 - `close()`.
+- `interruptedTask(conversationKey, exceptId='')` and `hasLaterActiveTask(id)` provide complete conversation checks without bounded-list scans. `failDelivery(id, minimumDelayMs=0)` respects Slack rate-limit backoff. Outbox returns only the oldest undelivered message per destination.
 Export `WorktreeManager({repoPath, worktreesRoot, gitCommand='git'})`. Async `ensure(conversationKey)` returns `{path,branch}`. Require repo with HEAD, use argv not shell, worktree name based on stable hash; validate existing mapping before reuse, preserve user changes, never reset/delete. `inspect()` returns branch, clean and remote metadata without fetching or mutation.
 
 ## Windows setup (Nova owns scripts/, docs/, manifests/, README.md)
