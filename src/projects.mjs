@@ -22,3 +22,16 @@ export function resolveProject(config, channel) {
   const { key, repoPath } = matches[0];
   return { key, repoPath, worktreesRoot: config.worktreesRoot };
 }
+
+/** Bind queued work to the accepted project, independently of later channel remapping. */
+export function projectIdentity(config, channel) {
+  const { key, repoPath } = resolveProject(config, channel);
+  if (typeof key !== 'string' || !key || typeof repoPath !== 'string' || !path.isAbsolute(repoPath)) {
+    throw new Error('Project routing: invalid project identity.');
+  }
+  // Normalize syntax and Windows casing, but never treat a different checkout or
+  // filesystem alias as permission to resume a task against another repository.
+  const absolute = path.resolve(repoPath);
+  return JSON.stringify([key, process.platform === 'win32' ? absolute.toLowerCase() : absolute]);
+}
+import path from 'node:path';
