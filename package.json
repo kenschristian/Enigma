@@ -1,0 +1,13 @@
+{
+  "name": "enigma-slack-codex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Windows Slack agents powered by the signed-in Codex app server",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "doctor": "node src/main.mjs doctor",
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+.worktrees/
+.generated/
+.local/
+data/
+config.local.json
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.secret
+.env*
+!.env.example
