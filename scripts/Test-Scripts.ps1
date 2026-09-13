@@ -61,11 +61,14 @@ if ($PrivateDirectoryAcl) {
         $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         foreach ($item in @($testPath, $testFile)) {
             $actual = Get-Acl -LiteralPath $item
-            if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $currentSid) { throw 'Private fixture owner changed.' }
+            # The helper sets the directory owner. A newly created child's owner
+            # follows the creator's token (which may default to Administrators in CI).
+            if ($item -eq $testPath -and $actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $currentSid) { throw 'Private directory owner changed.' }
             $rules = @($actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
             if ($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $currentSid -or $rules[0].AccessControlType -ne 'Allow' -or $rules[0].FileSystemRights -ne 'FullControl') {
                 throw 'Private fixture must grant FullControl only to the current user.'
             }
+            if ($item -eq $testFile -and -not $rules[0].IsInherited) { throw 'Private child file must inherit its current-user-only access rule.' }
         }
         if (-not (Get-Acl -LiteralPath $testPath).AreAccessRulesProtected) { throw 'Private directory unexpectedly inherits permissions.' }
         if ([IO.File]::ReadAllText($testFile) -cne 'Synthetic ACL regression fixture') { throw 'ACL reapplication changed existing content.' }
