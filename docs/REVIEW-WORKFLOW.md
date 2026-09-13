@@ -19,6 +19,8 @@ Use the configured user ID for Ken's mention and the configured destination IDs 
 
 Atlas verifies the repository, remote, branch, working-tree status, and existing PR before publishing. Specialists work in isolated worktrees and return local commits with test evidence; only Atlas pushes and creates or updates the PR. Preserve existing work and use the same PR throughout review and repairs.
 
+For Slack tasks whose sandbox prevents Git commits, Atlas's heartbeat also discovers completed edited work through the private task database and prepares it in an isolated integration worktree. It validates the saved project binding, source changes and inactive conversation before publishing. Read-only tasks need no PR; interrupted or ambiguous work stays preserved for explicit resolution. See `REVIEW-MONITOR.md` for the publication checks and recovery ledger. This operating policy does not give Slack workers additional Git permissions.
+
 Complete appropriate tests, required project checks, and final diff review before marking the PR Ready for Review. The description should explain the change and actual validation. An in-progress draft may exist, but completed work must be ready for review.
 
 The repository's `.greptile/config.json` sets `triggerOnDrafts` and `triggerOnUpdates` to `false`. These settings disable draft reviews and reviews on subsequent commits. Greptile reads configuration from the PR source branch; committing this file does not prove that an existing review ran or that the integration is installed. See the [official settings reference](https://www.greptile.com/docs/code-review/greptile-json-reference).
