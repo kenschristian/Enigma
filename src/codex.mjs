@@ -13,6 +13,21 @@ const safetyConfig = {
   'sandbox_workspace_write.network_access': false,
 };
 
+export function codexEnvironment(source = process.env, platform = process.platform) {
+  const entries = Object.entries(source).filter(([key]) =>
+    !/^(OPENAI_API_KEY$|CODEX_API_KEY$|ENIGMA_)/i.test(key));
+  if (platform !== 'win32') return Object.fromEntries(entries);
+  const normalized = new Map();
+  // Windows keys are case-insensitive. Match Node's deterministic first-key
+  // selection, then use PATH because the Codex sandbox adds that exact spelling.
+  // Keeping inherited Path as well makes Windows PowerShell's Env provider fail.
+  for (const [key, value] of entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    const identity = key.toUpperCase();
+    if (!normalized.has(identity)) normalized.set(identity, [identity === 'PATH' ? 'PATH' : key, value]);
+  }
+  return Object.fromEntries(normalized.values());
+}
+
 /** One stdio app-server connection, with at most one active run. Never logs RPC data. */
 export class CodexClient {
   constructor({ command = 'codex', args = [], cwd, requestTimeoutMs = 30000, spawnFn = spawn } = {}) {
@@ -36,8 +51,7 @@ export class CodexClient {
       this.child = this.spawnFn(this.command, [...this.args, 'app-server', '--listen', 'stdio://', ...overrides], {
         cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true,
         // Auth comes only from the existing Codex ChatGPT login. Do not inherit API credentials.
-        env: Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-          !/^(OPENAI_API_KEY$|CODEX_API_KEY$|ENIGMA_)/i.test(key))),
+        env: codexEnvironment(),
       });
       this.childExit = new Promise(resolve => {
         this.child.once('exit', () => { resolve(); this.fail(safeError('CODEX_EXIT', 'Codex app-server exited before the operation finished.')); });

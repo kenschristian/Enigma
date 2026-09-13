@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-import { CodexClient } from '../src/codex.mjs';
+import { CodexClient, codexEnvironment } from '../src/codex.mjs';
 
 const cwd = process.cwd();
 const options = { cwd, model: 'gpt-6-astra', effort: 'ultra', prompt: 'Build it.' };
@@ -47,6 +47,18 @@ const finish = (notify, { threadId = 'thread-1', turnId = 'turn-1', text = 'Done
   notify('turn/completed', { threadId, turn: { id: turnId, status, items: [{ type: 'agentMessage', id: 'answer', text, phase: 'final_answer' }] } });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('Windows child environment normalizes PATH, deduplicates names and strips credentials', () => {
+  const source = { Path: 'legacy-path', PATH: 'selected-path', TEMP: 'selected-temp', temp: 'duplicate-temp', SystemRoot: 'C:\\Windows', enigma_slack_token: 'private', OpenAI_Api_Key: 'private', CODEX_API_KEY: 'private' };
+  const normalized = codexEnvironment(source, 'win32');
+  assert.deepEqual(normalized, { PATH: 'selected-path', SystemRoot: 'C:\\Windows', TEMP: 'selected-temp' });
+  assert.equal(source.Path, 'legacy-path', 'the parent environment must remain unchanged');
+  assert.deepEqual(codexEnvironment({ Path: 'existing-search-path' }, 'win32'), { PATH: 'existing-search-path' });
+});
+
+test('non-Windows child environment preserves case-sensitive names', () => {
+  assert.deepEqual(codexEnvironment({ PATH: 'upper', Path: 'mixed', ENIGMA_TOKEN: 'private' }, 'linux'), { PATH: 'upper', Path: 'mixed' });
+});
+
 test('handshake runs once, disables shell, forces subscription auth and strips secrets', async t => {
   const previousSecret = process.env.ENIGMA_TEST_PRIVATE;
   process.env.ENIGMA_TEST_PRIVATE = 'private-test-value';
@@ -63,6 +75,9 @@ test('handshake runs once, disables shell, forces subscription auth and strips s
   assert.ok(h.spawnArgs.includes('forced_login_method="chatgpt"'));
   assert.equal(h.spawnOptions.env.OPENAI_API_KEY, undefined);
   assert.equal(h.spawnOptions.env.ENIGMA_TEST_PRIVATE, undefined);
+  if (process.platform === 'win32') {
+    assert.equal(Object.keys(h.spawnOptions.env).some(key => key.toUpperCase() === 'PATH' && key !== 'PATH'), false);
+  }
   assert.deepEqual(await h.client.account(), { account: { type: 'chatgpt', planType: 'pro' }, requiresOpenaiAuth: true });
   assert.deepEqual(await h.client.models(), [model]);
 });
