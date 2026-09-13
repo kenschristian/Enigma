@@ -5,6 +5,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TaskStore } from '../src/store.mjs';
 
+test('Slack retry-after delays persist and conversation ordering does not depend on timestamps', () => {
+  const store = new TaskStore(':memory:');
+  const input = {eventId:'one',conversationKey:'same',role:'atlas',prompt:'work',channel:'C1',slackThreadTs:'1.1',userId:'U1',teamId:'T1',botKey:'atlas'};
+  const first = store.enqueue(input).task;
+  store.update(first.id,{status:'interrupted'});
+  const second = store.enqueue({...input,eventId:'two'}).task;
+  assert.equal(store.hasLaterActiveTask(first.id),true);
+  assert.equal(store.interruptedTask('same').id,first.id);
+  assert.equal(store.interruptedTask('same',first.id),null);
+  store.update(second.id,{status:'cancelled'});
+  assert.equal(store.hasLaterActiveTask(first.id),false);
+  const message = store.addOutbox({botKey:'atlas',channel:'C1',text:'hello'});
+  store.failDelivery(message.id,60000);
+  assert.equal(store.pendingOutbox().length,0);
+  const saved=store.db.prepare('SELECT nextAttemptAt FROM outbox WHERE id = ?').get(message.id);
+  assert.ok(saved.nextAttemptAt >= Date.now()+59000);
+  store.close();
+});
+
 const input = (eventId, conversationKey = 'conversation') => ({ eventId, conversationKey, role: 'backend', prompt: 'Implement change', channel: 'C123', slackThreadTs: '123.456', userId: 'U123', teamId: 'T123', botKey: 'forge' });
 
 function fixture(t) {

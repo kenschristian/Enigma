@@ -39,3 +39,23 @@ test('Slack bot identity must match configured workspace', async () => {
   const c = new SlackConnection({bot:config.bots[0],teamId:'T123',env:{},api:async()=>({ok:true,team_id:'TOTHER',user_id:'UBOT',bot_id:'B1'})});
   await assert.rejects(c.verify(),/wrong_workspace/);
 });
+
+test('Socket Mode acknowledges only after synchronous persistence and closes cleanly', async () => {
+  class Socket extends EventTarget {
+    static last;
+    sent = [];
+    constructor() { super(); Socket.last = this; queueMicrotask(() => this.dispatchEvent(new Event('open'))); }
+    send(text) { this.sent.push(JSON.parse(text)); }
+    close() { this.dispatchEvent(new Event('close')); }
+  }
+  let persisted = 0;
+  const c = new SlackConnection({bot:config.bots[0],teamId:'T123',env:{},WebSocketClass:Socket,
+    api:async method=>method==='auth.test'?{team_id:'T123',user_id:'UBOT',bot_id:'B1'}:{url:'wss://wss-primary.slack.com/link'},
+    onEnvelope:()=>{persisted++; if(persisted===2)throw new Error('disk full');},
+  });
+  c.on('warning',()=>{});await c.start();
+  const socket=Socket.last;
+  for(const id of ['one','two']) socket.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'events_api',envelope_id:id,payload:envelope()})}));
+  assert.equal(persisted,2);assert.deepEqual(socket.sent,[{envelope_id:'one'}]);
+  c.stop();assert.equal(c.stopped,true);assert.equal(c.reconnectTimer,null);
+});
