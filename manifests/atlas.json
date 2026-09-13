@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Enigma Atlas",
+    "name": "Atlas - Manager",
     "background_color": "#172235",
-    "description": "Private Slack-to-Codex coding assistant"
+    "description": "Manager — plans work, coordinates engineers, validates changes and prepares your Merge handoff."
   },
   "features": {
     "bot_user": {
-      "display_name": "Atlas",
+      "display_name": "Atlas - Manager",
       "always_online": false
     }
   },

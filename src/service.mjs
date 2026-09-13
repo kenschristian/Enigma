@@ -139,7 +139,7 @@ export class AgentService {
           throw Object.assign(new Error('Legacy task worktree does not match saved work.'), { code: 'PROJECT_MAPPING_CHANGED' });
         }
       }
-      client = this.clientFactory(task);
+      client = this.clientFactory(task, worktree);
       this.store.update(task.id, { worktreePath: worktree.path, branch: worktree.branch });
       const previous = this.store.conversation(task.conversationKey);
       if (signal.aborted) return;

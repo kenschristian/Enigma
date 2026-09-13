@@ -90,8 +90,8 @@ export class WorktreeManager {
     }
     if (entry) {
       if (entry.branch !== `refs/heads/${branch}` || entry.bare || entry.prunable) throw new Error('Worktree mapping does not match conversation');
-      await this.validate(path, branch);
-      return { path, branch };
+      const gitCommonDir = await this.validate(path, branch);
+      return { path, branch, gitCommonDir };
     }
     try {
       await lstat(path);
@@ -101,8 +101,8 @@ export class WorktreeManager {
       const existingBranches = await this.git(['for-each-ref', '--format=%(refname)', `refs/heads/${branch}`]);
       if (existingBranches) throw new Error('Conversation branch exists without its expected worktree');
       await this.git(['worktree', 'add', '-b', branch, '--', path, 'HEAD']);
-      await this.validate(path, branch);
-      return { path, branch };
+      const gitCommonDir = await this.validate(path, branch);
+      return { path, branch, gitCommonDir };
     }
     throw new Error('Conversation worktree path already exists without its expected mapping');
   }
@@ -117,8 +117,20 @@ export class WorktreeManager {
       this.git(['rev-parse', '--path-format=absolute', '--git-common-dir']),
       this.git(['symbolic-ref', '--quiet', 'HEAD'], path),
     ]);
+    const gitCommonDir = await realpath(common);
     if (canonical(actualPath) !== canonical(await realpath(rootPath)) ||
-        canonical(await realpath(common)) !== canonical(await realpath(expectedCommon)) ||
+        canonical(gitCommonDir) !== canonical(await realpath(expectedCommon)) ||
         actualBranch !== `refs/heads/${branch}`) throw new Error('Worktree repository or branch does not match conversation');
+    // The Windows profile must grant only this repository's dedicated metadata,
+    // never a separate Git directory that could also contain private state.
+    if (process.platform === 'win32') {
+      const metadataPath = join(this.repoPath, '.git');
+      const metadata = await lstat(metadataPath);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() ||
+          canonical(gitCommonDir) !== canonical(await realpath(metadataPath))) {
+        throw new Error('The configured repository must have its own regular .git directory');
+      }
+    }
+    return gitCommonDir;
   }
 }

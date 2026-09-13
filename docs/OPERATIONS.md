@@ -20,7 +20,7 @@ The wrapper holds an exclusive lock on the configured state directory. A second 
 
 Only events received and persisted locally can be recovered. There is no promise to replay messages sent while the computer is asleep, offline, signed out, or stopped. Resend the request when connected if it was never acknowledged. A task accepted before a crash may have partially completed changes; review those before resuming.
 
-The computer must be awake, online, and signed in for the startup runner to work. If three restart attempts fail, fix the underlying issue and run `Restart-Agents.ps1`. That script reports that a start was requested; a successful Slack response confirms connectivity.
+The computer must be awake, online, and signed in for the startup runner to work. If three restart attempts fail, fix the underlying issue and run `Restart-Agents.ps1`. That script checks that the scheduled runner remains active; a successful Slack response confirms connectivity.
 
 ## Troubleshooting
 
@@ -29,6 +29,10 @@ The computer must be awake, online, and signed in for the startup runner to work
 **No Slack reply:** Confirm doctor passes, the process is running, the bot is invited to the channel, Socket Mode is enabled, the app token has `connections:write`, and you used a real `@Atlas` mention. Check the exact user/channel/workspace IDs in the private configuration. Ordinary messages, DMs, bots, and unauthorized IDs are not accepted by the supplied manifest/configuration.
 
 **A request needs elevated access:** The bridge does not approve it. Review the request locally and decide how to proceed through an interactive Codex session. Do not weaken the bridge sandbox to make an unattended task pass.
+
+**Private worktree permissions:** Windows coding sessions use the installed Codex beta permission-profile contract: the verified conversation worktree is writable, its configured repository's dedicated `.git` directory is readable, and Git metadata, `.codex`, and `.agents` remain protected from writes. Unrelated private folders and network access are not granted. The client verifies the effective profile before starting work and stops with `CODEX_PROFILE` if the runtime cannot confirm it. The configured repository must be a regular clone with its own `.git` directory. Git operations that change protected metadata still need an interactive approval; this connection never approves them automatically.
+
+**PowerShell starts in the wrong folder:** The installed Windows PowerShell provider cannot enter these private package folders reliably. Coding instructions use `C:\Windows\System32\cmd.exe`, `login:false`, an explicit work directory, and `git -C` with the absolute worktree path. Child environment names are normalized to prevent duplicate `PATH`/`Path` entries. These workarounds were checked with the installed Codex runtime; do not broaden folder access to work around a shell error.
 
 **Tokens rotated or app reinstalled:** Stop the runner, then rerun `Setup.ps1` (add `-FourBots` if appropriate). Enter every active token pair again. Doctor must pass before restarting. Never edit plaintext tokens into `config.json`.
 

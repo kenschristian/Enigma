@@ -30,6 +30,7 @@ test('creates stable isolated worktrees and preserves dirty and untracked files 
   const key = 'T1:C1:123.456; $(ignored)';
   const [first, simultaneous] = await Promise.all([manager.ensure(key), manager.ensure(key)]);
   assert.deepEqual(first, simultaneous);
+  assert.equal(first.gitCommonDir, await realpath(join(repoPath, '.git')));
   await writeFile(join(first.path, 'tracked.txt'), 'unfinished work\n');
   await writeFile(join(first.path, 'untracked.txt'), 'keep me');
   const reopened = new WorktreeManager({ repoPath, worktreesRoot });
@@ -126,4 +127,13 @@ test('a conversation path cannot reuse another mapped worktree through a directo
   await symlink(first.path, linkedPath, process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(manager.ensure('linked'), /already exists|not a regular directory/);
   assert.equal(await readFile(join(first.path, 'tracked.txt'), 'utf8'), original);
+});
+
+test('Windows metadata grants reject repositories using a separate Git directory', { skip: process.platform !== 'win32' }, async t => {
+  const { manager, repoPath } = await fixture(t);
+  const head = git(repoPath, ['rev-parse', 'HEAD']);
+  git(repoPath, ['init', '--separate-git-dir', join(repoPath, '..', 'separate-metadata')]);
+  await assert.rejects(manager.ensure('private-metadata'), /own regular \.git directory/);
+  assert.equal(git(repoPath, ['rev-parse', 'HEAD']), head);
+  assert.equal(await readFile(join(repoPath, 'tracked.txt'), 'utf8'), 'original\n');
 });

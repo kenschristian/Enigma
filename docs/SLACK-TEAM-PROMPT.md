@@ -9,6 +9,8 @@ Organize each project into clearly named private Slack channels. For Enigma, use
 
 For Jarvis, use **#jarvis-work**, **#jarvis-pull-requests**, **#jarvis-code-review**, and **#jarvis-updates** with the same purposes. Bind Enigma channels only to `kenschristian/Enigma` and Jarvis channels only to `kenschristian/jarvis`, using explicit private channel IDs. Future projects use their own prefix. Atlas coordinates Nova, Forge, and Bridge using the existing Codex account.
 
+Use recognizable avatars and these Slack names: **Atlas - Manager**, **Forge - Back End Engineer**, **Nova - Front End Engineer**, and **Bridge - API Engineer**. Mention Atlas for coordinated work, or a specialist for a task within that role. Add another role only when it has a useful distinct responsibility, while keeping at most three specialists active. Label forwarded Greptile findings clearly as verified GitHub review evidence; do not impersonate an official Greptile Slack app.
+
 When implementation and required checks are complete, mark the PR **Ready for review**. Let Greptile perform one initial review. Atlas assesses the findings, fixes valid issues, and reruns the necessary tests and checks. Do not request a second Greptile review after those fixes.
 
 When no actionable findings remain and required checks pass, tag Ken in the project's pull-requests channel with the PR link, a concise change summary, and: **Ready for your merge: review findings resolved and required checks passed.**

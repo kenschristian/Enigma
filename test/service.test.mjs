@@ -83,8 +83,12 @@ test('results are saved before delivery and failed delivery retries without reru
 test('project channels choose their own repository and keep saved conversations separate',async()=>{
   const selected=[],calls=[];
   const {store,service}=fixture({config:{allowedChannelIds:['C1','C2']},
-    worktreesFor:task=>({ensure:async key=>{selected.push({channel:task.channel,key});return {path:`C:/work/${task.channel}`,branch:`codex/${task.channel}`};}}),
-    clientFactory:task=>({start:async()=>{},close:async()=>{},run:async params=>{calls.push({...params,channel:task.channel});params.onThread(`saved-${task.channel}`);return {status:'completed',text:'Done'};}})});
+    worktreesFor:task=>({ensure:async key=>{selected.push({channel:task.channel,key});return {path:`C:/work/${task.channel}`,branch:`codex/${task.channel}`,gitCommonDir:`C:/repos/${task.channel}/.git`};}}),
+    clientFactory:(task,worktree)=>{
+      assert.equal(worktree.path,`C:/work/${task.channel}`);
+      assert.equal(worktree.gitCommonDir,`C:/repos/${task.channel}/.git`);
+      return {start:async()=>{},close:async()=>{},run:async params=>{calls.push({...params,channel:task.channel});params.onThread(`saved-${task.channel}`);return {status:'completed',text:'Done'};}};
+    }});
   service.receive(event('E1','Enigma work'),connection);
   const jarvis=event('E2','Jarvis work');jarvis.event.channel='C2';
   service.receive(jarvis,connection);service.pump();await drained(service);service.pump();await drained(service);

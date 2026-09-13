@@ -62,7 +62,8 @@ export async function start(config) {
     const managers = new Map(configuredProjects(config).map(project => [project.key, new WorktreeManager(project)]));
     service = new AgentService({ config, store, connections,
       worktreesFor: task => managers.get(resolveProject(config, task.channel).key),
-      clientFactory: task => new CodexClient({ command: config.codexCommand, cwd: resolveProject(config, task.channel).repoPath }), log });
+      clientFactory: (_task, worktree) => new CodexClient({ command: config.codexCommand, cwd: worktree.path,
+        workspace: { path: worktree.path, gitCommonDir: worktree.gitCommonDir } }), log });
     await doctor(config, { log });
     for (const bot of config.bots) {
       const connection = new SlackConnection({ bot, teamId: config.allowedTeamId, allowedUserIds: config.allowedUserIds, onEnvelope: (payload, source) => service.receive(payload, source) });

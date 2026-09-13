@@ -15,7 +15,7 @@ Start with **[Windows setup](docs/SETUP.md)**. Slack workspace: [enigma777](http
 @Atlas cancel <task-id>
 ```
 
-Use a real Slack mention in an explicitly allowed channel. These are ordinary messages, not slash commands. Atlas is the default identity; separate Nova, Forge, and Bridge apps are optional. Runtime roles are `frontend`, `backend`, and `api`.
+Use a real Slack mention in an explicitly allowed channel. These are ordinary messages, not slash commands. The team profiles are **Atlas - Manager**, **Forge - Back End Engineer**, **Nova - Front End Engineer**, and **Bridge - API Engineer**, each with its own [avatar](assets/agents/README.md). Mention Atlas for coordinated work or a specialist for its own responsibility. Runtime roles remain `frontend`, `backend`, and `api`; at most three specialists run concurrently.
 
 Use **#enigma-work** for this bridge and **#jarvis-work** for Jarvis. Each project also has private `-pull-requests`, `-code-review`, and `-updates` channels. The [team prompt](docs/SLACK-TEAM-PROMPT.md) explains their purposes. Completed changes receive one initial Greptile review; agents fix valid findings and run required checks, then tag you for Merge without requesting another Greptile pass. The [review workflow](docs/REVIEW-WORKFLOW.md) and separately activated [Codex monitor](docs/REVIEW-MONITOR.md) govern that handoff.
 
