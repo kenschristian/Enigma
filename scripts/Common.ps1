@@ -52,7 +52,14 @@ function Initialize-PrivateDirectory([string]$Path) {
     $acl.SetOwner($sid)
     $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
     $acl.AddAccessRule($rule)
-    Set-Acl -LiteralPath $full -AclObject $acl
+    # Set-Acl's provider can request audit/SACL privileges when reapplying an ACL.
+    # These APIs persist only the owner and DACL sections modified above, without
+    # touching the audit policy or requiring SeSecurityPrivilege.
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        [IO.Directory]::SetAccessControl($full, $acl)
+    } else {
+        [IO.FileSystemAclExtensions]::SetAccessControl((New-Object IO.DirectoryInfo($full)), $acl)
+    }
     return $full
 }
 

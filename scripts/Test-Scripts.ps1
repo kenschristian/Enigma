@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 [CmdletBinding()]
-param()
+param([switch]$PrivateDirectoryAcl)
 $ErrorActionPreference = 'Stop'
 $failureCount = 0
 Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' | ForEach-Object {
@@ -45,5 +45,35 @@ try {
     [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
     $secret.Dispose()
     $roundTrip.Dispose()
+}
+if ($PrivateDirectoryAcl) {
+    # Opt-in filesystem integration test: only a fresh, named directory and its
+    # synthetic file are touched. Existing configuration and credentials are never read.
+    $testPath = Join-Path (Get-EnigmaHome) ('acl-test-' + [guid]::NewGuid().ToString('N'))
+    $testPath = Assert-PrivatePath $testPath
+    $testFile = Join-Path $testPath 'synthetic.txt'
+    try {
+        [void](Initialize-PrivateDirectory $testPath)
+        [IO.File]::WriteAllText($testFile, 'Synthetic ACL regression fixture')
+        # The regression occurs when setup secures a directory that already exists.
+        [void](Initialize-PrivateDirectory $testPath)
+        [void](Initialize-PrivateDirectory $testPath)
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        foreach ($item in @($testPath, $testFile)) {
+            $actual = Get-Acl -LiteralPath $item
+            if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $currentSid) { throw 'Private fixture owner changed.' }
+            $rules = @($actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+            if ($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $currentSid -or $rules[0].AccessControlType -ne 'Allow' -or $rules[0].FileSystemRights -ne 'FullControl') {
+                throw 'Private fixture must grant FullControl only to the current user.'
+            }
+        }
+        if (-not (Get-Acl -LiteralPath $testPath).AreAccessRulesProtected) { throw 'Private directory unexpectedly inherits permissions.' }
+        if ([IO.File]::ReadAllText($testFile) -cne 'Synthetic ACL regression fixture') { throw 'ACL reapplication changed existing content.' }
+        Write-Host 'PASS: fresh and existing private directory ACLs, current-user owner, protected DACL, inherited child access, and preserved contents.'
+    } finally {
+        # No recursive deletion: remove only this test's known file and empty directory.
+        if (Test-Path -LiteralPath $testFile) { Remove-Item -LiteralPath $testFile -Force }
+        if (Test-Path -LiteralPath $testPath) { [IO.Directory]::Delete($testPath, $false) }
+    }
 }
 Write-Host 'PASS: PowerShell parser, Slack ID input/serialization, argument quoting, private-path rejection, and current-user DPAPI round trip.'
