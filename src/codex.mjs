@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join, normalize, parse } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { isDeepStrictEqual } from 'node:util';
 
 const MAX_FRAME = 8 * 1024 * 1024;
 const safeError = (code, message) => Object.assign(new Error(message), { code });
@@ -12,6 +13,28 @@ const safetyConfig = {
   sandbox_mode: 'workspace-write', approval_policy: 'on-request', approvals_reviewer: 'user',
   'sandbox_workspace_write.network_access': false,
 };
+const PROFILE_ID = 'enigma_workspace';
+const profileError = () => safeError('CODEX_PROFILE', 'Codex did not confirm the required workspace permission profile. No work was started.');
+const pathIdentity = value => typeof value === 'string' ? normalize(value).replace(/[\\/]+$/, '').toLowerCase() : null;
+const reservedConfig = /^(permissions|default_permissions|sandbox_mode|sandbox_workspace_write|approval_policy|approvals_reviewer|forced_login_method|model_provider|windows)(\.|$)/;
+// JSON strings use the same escapes as TOML basic strings for these validated paths.
+const toml = value => typeof value === 'string' ? JSON.stringify(value) : typeof value === 'boolean' ? String(value)
+  : `{${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}=${toml(item)}`).join(',')}}`;
+const withoutNullDefaults = value => object(value) ? Object.fromEntries(Object.entries(value)
+  .filter(([, item]) => item !== null).map(([key, item]) => [key, withoutNullDefaults(item)])) : value;
+
+function workspaceProfile(workspace) {
+  if (!object(workspace) || ![workspace.path, workspace.gitCommonDir].every(value =>
+    typeof value === 'string' && isAbsolute(value) && !/[\x00-\x1f]/.test(value) && normalize(value) !== parse(value).root)) {
+    throw new TypeError('Invalid validated Codex workspace.');
+  }
+  const path = normalize(workspace.path);
+  const gitCommonDir = normalize(workspace.gitCommonDir);
+  const profile = { filesystem: { ':minimal': 'read', [path]: 'write', [gitCommonDir]: 'read',
+    [join(path, '.git')]: 'read', [join(path, '.codex')]: 'read', [join(path, '.agents')]: 'read' },
+    network: { enabled: false } };
+  return { path, profile };
+}
 
 export function codexEnvironment(source = process.env, platform = process.platform) {
   const entries = Object.entries(source).filter(([key]) =>
@@ -30,10 +53,21 @@ export function codexEnvironment(source = process.env, platform = process.platfo
 
 /** One stdio app-server connection, with at most one active run. Never logs RPC data. */
 export class CodexClient {
-  constructor({ command = 'codex', args = [], cwd, requestTimeoutMs = 30000, spawnFn = spawn } = {}) {
+  constructor({ command = 'codex', args = [], cwd, workspace, requestTimeoutMs = 30000, spawnFn = spawn } = {}) {
     if (typeof command !== 'string' || !Array.isArray(args) || !args.every(x => typeof x === 'string') ||
         !Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0) throw new TypeError('Invalid Codex client options.');
     Object.assign(this, { command, args, cwd, requestTimeoutMs, spawnFn });
+    if (process.platform === 'win32' && workspace !== undefined) {
+      this.workspace = workspaceProfile(workspace);
+      if ((cwd !== undefined && pathIdentity(cwd) !== pathIdentity(this.workspace.path)) || args.length) {
+        throw new TypeError('Workspace clients require a matching cwd and no additional CLI arguments.');
+      }
+      this.cwd = this.workspace.path;
+    }
+    this.policyConfig = this.workspace ? {
+      forced_login_method: 'chatgpt', model_provider: 'openai', approval_policy: 'on-request', approvals_reviewer: 'user',
+      [`permissions.${PROFILE_ID}`]: this.workspace.profile, default_permissions: PROFILE_ID, 'windows.sandbox': 'elevated',
+    } : safetyConfig;
     this.pending = new Map();
     this.sequence = 0;
     this.buffer = '';
@@ -47,7 +81,7 @@ export class CodexClient {
 
   async initialize() {
     try {
-      const overrides = Object.entries(safetyConfig).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`]);
+      const overrides = Object.entries(this.policyConfig).flatMap(([key, value]) => ['-c', `${key}=${toml(value)}`]);
       this.child = this.spawnFn(this.command, [...this.args, 'app-server', '--listen', 'stdio://', ...overrides], {
         cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true,
         // Auth comes only from the existing Codex ChatGPT login. Do not inherit API credentials.
@@ -69,7 +103,7 @@ export class CodexClient {
       this.child.stderr.resume();
       await this.request('initialize', {
         clientInfo: { name: 'enigma_slack_bridge', title: 'Enigma', version: '1.0.0' },
-        capabilities: { experimentalApi: false, requestAttestation: false },
+        capabilities: { experimentalApi: Boolean(this.workspace), requestAttestation: false },
       });
       this.write({ method: 'initialized', params: {} });
       return this;
@@ -193,6 +227,9 @@ export class CodexClient {
         (threadId !== undefined && (typeof threadId !== 'string' || !threadId)) ||
         !Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Invalid Codex run options.');
     if (signal?.aborted) throw safeError('CODEX_CANCELLED', 'Codex task was cancelled.');
+    if (this.workspace && (pathIdentity(cwd) !== pathIdentity(this.workspace.path) || Object.keys(config).some(key => reservedConfig.test(key)))) {
+      throw safeError('CODEX_PROFILE', 'The run workspace or configuration conflicts with the required permission profile.');
+    }
     let resolve, reject;
     const completion = new Promise((res, rej) => { resolve = res; reject = rej; });
     // Install a handler before setup: exit/abort can happen before the turn is started.
@@ -214,15 +251,32 @@ export class CodexClient {
         if (!available || !available.supportedReasoningEfforts?.some(option => option.reasoningEffort === effort)) {
           throw safeError('CODEX_MODEL', 'The requested Codex model and reasoning effort are unavailable. No substitute was selected.');
         }
+        if (this.workspace) {
+          // Config layers can merge tables. Check the effective profile, not just its name,
+          // so a same-name user/project profile cannot add inherited access silently.
+          let effective;
+          try { effective = await this.request('config/read', { cwd: this.workspace.path, includeLayers: false }); }
+          catch { const error = profileError(); this.fail(error); throw error; }
+          check();
+          if (!isDeepStrictEqual(withoutNullDefaults(effective?.config?.permissions?.[PROFILE_ID]), this.workspace.profile)) {
+            const error = profileError(); this.fail(error); throw error;
+          }
+        }
         const params = {
           ...(threadId ? { threadId, excludeTurns: true } : {}), cwd, model, modelProvider: 'openai',
-          approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: 'workspace-write',
+          approvalPolicy: 'on-request', approvalsReviewer: 'user',
+          ...(this.workspace ? { permissions: PROFILE_ID, runtimeWorkspaceRoots: [this.workspace.path] } : { sandbox: 'workspace-write' }),
           developerInstructions: instructions,
-          config: { ...config, ...safetyConfig, model, model_reasoning_effort: effort },
+          config: { ...config, ...this.policyConfig, model, model_reasoning_effort: effort },
         };
         const result = await this.request(threadId ? 'thread/resume' : 'thread/start', params);
         check();
         if (typeof result?.thread?.id !== 'string' || result.model !== model || result.modelProvider !== 'openai') throw protocolError();
+        if (this.workspace && (result.activePermissionProfile?.id !== PROFILE_ID || result.activePermissionProfile.extends !== null ||
+            !Array.isArray(result.runtimeWorkspaceRoots) || result.runtimeWorkspaceRoots.length !== 1 ||
+            pathIdentity(result.runtimeWorkspaceRoots[0]) !== pathIdentity(this.workspace.path))) {
+          const error = profileError(); this.fail(error); throw error;
+        }
         run.threadId = result.thread.id;
         try { await onThread?.(run.threadId); }
         catch { throw safeError('CODEX_PERSIST', 'Could not save the Codex thread before starting work.'); }
@@ -230,7 +284,9 @@ export class CodexClient {
         run.startingTurn = true;
         const started = await this.request('turn/start', {
           threadId: run.threadId, cwd, model, effort, approvalPolicy: 'on-request', approvalsReviewer: 'user',
-          sandboxPolicy: { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true },
+          ...(this.workspace ? { permissions: PROFILE_ID, runtimeWorkspaceRoots: [this.workspace.path] } : {
+            sandboxPolicy: { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true },
+          }),
           input: [{ type: 'text', text: prompt, text_elements: [] }],
         });
         check();
