@@ -26,6 +26,11 @@ export class WorktreeManager {
   }
 
   async inspect() {
+    try {
+      await this.git(['rev-parse', '--verify', 'HEAD^{commit}']);
+    } catch {
+      throw new Error('Repository HEAD must resolve to a commit; verify Git access and create an initial commit if needed');
+    }
     const [branch, status, remotes] = await Promise.all([
       this.git(['branch', '--show-current']),
       this.git(['status', '--porcelain']),

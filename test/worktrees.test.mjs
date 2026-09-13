@@ -47,6 +47,20 @@ test('rejects an unborn repository without creating a worktree', async (t) => {
   await assert.rejects(manager.ensure('key'), /Git operation failed/);
 });
 
+test('inspect rejects an unborn repository with safe actionable guidance', async (t) => {
+  const { manager, repoPath } = await fixture(t, false);
+  await assert.rejects(manager.inspect(), /HEAD must resolve to a commit/);
+  assert.equal(await readFile(join(repoPath, 'tracked.txt'), 'utf8'), 'original\n');
+});
+
+test('inspect accepts a detached committed HEAD', async (t) => {
+  const { manager, repoPath } = await fixture(t);
+  git(repoPath, ['checkout', '--detach']);
+  const info = await manager.inspect();
+  assert.equal(info.branch, null);
+  assert.equal(info.clean, true);
+});
+
 test('rejects existing directory collision and leaves contents intact', async (t) => {
   const { manager, worktreesRoot } = await fixture(t);
   const path = join(worktreesRoot, hash('key'));

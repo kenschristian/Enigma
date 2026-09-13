@@ -101,3 +101,36 @@ test('invalid mutations preserve task and do not leave an open transaction', (t)
   assert.equal(store.enqueue(input('b')).created, true);
   assert.equal(store.get(task.id).status, 'queued');
 });
+
+test('outbox preserves destination order across failures and reopen while other destinations deliver', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 100000 });
+  const open = fixture(t);
+  const store = open();
+  const destination = { botKey: 'forge', channel: 'C123', threadTs: '123.456' };
+  const first = store.addOutbox({ ...destination, text: 'First chunk' });
+  const second = store.addOutbox({ ...destination, text: 'Second chunk' });
+  const otherThread = store.addOutbox({ ...destination, threadTs: '456.789', text: 'Other thread' });
+  const otherBot = store.addOutbox({ ...destination, botKey: 'atlas', text: 'Other bot' });
+  const otherChannel = store.addOutbox({ ...destination, channel: 'C456', text: 'Other channel' });
+  assert.deepEqual(store.pendingOutbox().map(message => message.id), [first.id, otherThread.id, otherBot.id, otherChannel.id]);
+  store.failDelivery(first.id);
+  store.close();
+  const reopened = open();
+  assert.deepEqual(reopened.pendingOutbox().map(message => message.id), [otherThread.id, otherBot.id, otherChannel.id]);
+  for (const message of reopened.pendingOutbox()) reopened.markDelivered(message.id);
+  assert.deepEqual(reopened.pendingOutbox(), []);
+  t.mock.timers.tick(1000);
+  assert.deepEqual(reopened.pendingOutbox().map(message => message.id), [first.id]);
+  reopened.markDelivered(first.id);
+  assert.deepEqual(reopened.pendingOutbox().map(message => message.id), [second.id]);
+});
+
+test('outbox groups messages without a Slack thread into the same destination', (t) => {
+  const store = fixture(t)();
+  const destination = { botKey: 'forge', channel: 'C123' };
+  const first = store.addOutbox({ ...destination, text: 'First' });
+  const second = store.addOutbox({ ...destination, text: 'Second' });
+  assert.deepEqual(store.pendingOutbox().map(message => message.id), [first.id]);
+  store.markDelivered(first.id);
+  assert.deepEqual(store.pendingOutbox().map(message => message.id), [second.id]);
+});

@@ -49,6 +49,8 @@ export class TaskStore {
         deliveredAt INTEGER,
         nextAttemptAt INTEGER NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS outbox_destination ON outbox(botKey, channel, threadTs, sequence)
+        WHERE deliveredAt IS NULL;
     `);
   }
 
@@ -163,8 +165,15 @@ export class TaskStore {
   }
 
   pendingOutbox(limit = 20) {
-    return this.db.prepare(`SELECT * FROM outbox WHERE deliveredAt IS NULL AND nextAttemptAt <= ?
-      ORDER BY sequence LIMIT ?`).all(Date.now(), limitValue(limit)).map((row) => ({ ...row }));
+    // Return only the oldest undelivered message per destination. Later chunks
+    // cannot overtake it, including while a previously fetched send is failing.
+    return this.db.prepare(`SELECT message.* FROM outbox message
+      WHERE message.deliveredAt IS NULL AND message.nextAttemptAt <= ?
+      AND NOT EXISTS (
+        SELECT 1 FROM outbox earlier WHERE earlier.deliveredAt IS NULL
+          AND earlier.botKey = message.botKey AND earlier.channel = message.channel
+          AND earlier.threadTs IS message.threadTs AND earlier.sequence < message.sequence
+      ) ORDER BY message.sequence LIMIT ?`).all(Date.now(), limitValue(limit)).map((row) => ({ ...row }));
   }
 
   markDelivered(id) {
