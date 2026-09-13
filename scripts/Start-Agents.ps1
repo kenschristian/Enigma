@@ -6,17 +6,35 @@ $process = $null
 $lock = $null
 $started = $false
 $exitCode = 1
+$stage = 'configuration-path'
+$logPath = $null
+
+function Write-RunnerDiagnostic([string]$EventName, [string]$Detail = '') {
+    if (-not $logPath) { return }
+    try {
+        if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -gt 1048576) {
+            Move-Item -LiteralPath $logPath -Destination ($logPath + '.1') -Force
+        }
+        Add-Content -LiteralPath $logPath -Value ((Get-Date -Format o) + " pid=$PID stage=$stage event=$EventName $Detail")
+    } catch { } # A diagnostic write must never obscure the runner's original result.
+}
+
 try {
     $Config = Assert-PrivatePath $Config
     $privateRoot = Split-Path -Parent $Config
+    $logPath = Join-Path $privateRoot 'runner.log'
+    Write-RunnerDiagnostic 'starting'
+    $stage = 'configuration-read'
     $settings = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
     $runtime = Get-Content -LiteralPath (Join-Path $privateRoot 'runtime.json') -Raw | ConvertFrom-Json
     $encrypted = Get-Content -LiteralPath (Join-Path $privateRoot 'secrets.json') -Raw | ConvertFrom-Json
     $stateDir = Assert-PrivatePath $settings.stateDir
     if (-not $Doctor) {
+        $stage = 'process-lock'
         try { $lock = [IO.File]::Open((Join-Path $stateDir 'runner.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
         catch [IO.IOException] { Write-Host 'Enigma is already running or its state directory is unavailable.'; exit 0 }
     }
+    $stage = 'process-configuration'
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $runtime.nodeCommand
     $start.WorkingDirectory = Split-Path -Parent $PSScriptRoot
@@ -30,6 +48,7 @@ try {
     $start.RedirectStandardError = $true
     # Prevent inherited API credentials from becoming a billing fallback.
     foreach ($name in @('OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_ADMIN_KEY')) { $start.EnvironmentVariables.Remove($name) }
+    $stage = 'credential-decryption'
     foreach ($bot in $settings.bots) {
         foreach ($name in @($bot.botTokenEnv, $bot.appTokenEnv)) {
             if ($name -cnotmatch '^ENIGMA_[A-Z0-9_]+_(BOT|APP)_TOKEN$') { throw 'Unexpected token environment name.' }
@@ -46,29 +65,30 @@ try {
     }
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
+    $stage = 'process-start'
     [void]$process.Start()
     $started = $true
+    Write-RunnerDiagnostic 'child-started' ('childPid=' + $process.Id)
     # Drain both streams concurrently without retaining prompts, RPC payloads, or secrets.
     $stdout = $process.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
     $stderr = $process.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
     $start.EnvironmentVariables.Clear()
+    $stage = 'process-wait'
     if (-not $Doctor) { Write-Host 'Enigma is running. Use Slack status to check work. Ctrl+C stops this foreground runner.' }
     while (-not $process.WaitForExit(250)) { }
-    $stdout.GetAwaiter().GetResult()
-    $stderr.GetAwaiter().GetResult()
+    [void]$stdout.GetAwaiter().GetResult()
+    [void]$stderr.GetAwaiter().GetResult()
     $exitCode = $process.ExitCode
+    Write-RunnerDiagnostic 'child-exited' ('exitCode=' + $exitCode)
     if ($Doctor) {
         if ($exitCode -eq 0) { Write-Host 'Doctor passed: configuration and account checks succeeded.' -ForegroundColor Green }
         else { Write-Host 'Doctor failed. Check configuration, Slack tokens, Codex ChatGPT login, and required model access. See docs/SETUP.md.' -ForegroundColor Yellow }
-    } else {
-        $logPath = Join-Path $privateRoot 'runner.log'
-        if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -gt 1048576) {
-            Move-Item -LiteralPath $logPath -Destination ($logPath + '.1') -Force
-        }
-        Add-Content -LiteralPath $logPath -Value ((Get-Date -Format o) + ' runner stopped; exit code ' + $exitCode)
     }
 } catch {
-    Write-Host 'Enigma could not start. Rerun Setup.ps1 under the Windows account that saved the tokens; check docs/SETUP.md.' -ForegroundColor Red
+    # Never record exception messages, script source, RPC payloads, or credentials.
+    $failure = $_.Exception.GetBaseException()
+    Write-RunnerDiagnostic 'failed' ('type=' + $failure.GetType().FullName + ' hresult=' + $failure.HResult)
+    Write-Host "Enigma could not start at stage '$stage'. Check the safe diagnostics in runner.log and docs/SETUP.md." -ForegroundColor Red
 } finally {
     if ($process) {
         if ($started -and -not $process.HasExited) {

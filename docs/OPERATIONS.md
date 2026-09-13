@@ -10,6 +10,7 @@ Run commands from the repository in your normal signed-in Windows PowerShell ses
 | Restart registered runner | `.\scripts\Restart-Agents.ps1` |
 | Stop and remove startup | `.\scripts\Remove-Startup.ps1` |
 | Check script syntax and credential helpers | `.\scripts\Test-Scripts.ps1` |
+| Test startup paths and safe diagnostics with synthetic fixtures | `.\scripts\Test-Startup.ps1` |
 
 The startup task name is `EnigmaAgents-` followed by your Windows SID. You can inspect it in **Task Scheduler**. Removal stops the registered task and preserves configuration, task history, and worktrees. A separately started foreground runner must be stopped in its own console. Startup registration requires no administrator elevation, although managed Windows policies can prohibit task registration; use the foreground runner in that case.
 
@@ -35,7 +36,9 @@ The computer must be awake, online, and signed in for the startup runner to work
 
 **Different Windows user / access denied:** Run under the user who completed setup. Encrypted tokens cannot be copied to another account as a working configuration. Setup uses a private directory ACL, so backups and account migration require deliberate handling.
 
-**Need logs:** `%LOCALAPPDATA%\EnigmaAgents\runner.log` contains only runner exit timestamps/codes. At roughly 1 MB, it rotates to one `.1` file. Slack prompts, replies, and credentials are not written there. Task state contains private prompts/results and must remain outside Git and cloud-synced folders.
+**Need logs:** `runner.log` beside the startup configuration contains timestamps, process IDs, fixed startup stages, exit codes, and exception type/HResult codes. At roughly 1 MB, it rotates to one `.1` file. Exception messages, Slack prompts, replies, credentials, and raw process/RPC output are not written there. Task state contains private prompts/results and must remain outside Git and cloud-synced folders.
+
+**Starts in Codex but immediately stops in Task Scheduler:** A packaged Windows app can redirect `%LOCALAPPDATA%` writes into its own package directory. Startup installation resolves the existing physical configuration, state, worktree, Node, Codex, and project paths before doctor and registration. It updates only nonsecret path metadata; credentials and worktrees stay in place. The installer prints the physical startup configuration path, which is also recorded in the task action. Use that exact path with `Start-Agents.ps1 -Config '<path>' -Doctor` when running from a normal PowerShell session. Microsoft describes this [MSIX AppData redirection](https://learn.microsoft.com/en-us/windows/msix/packaging-tool/know-your-installer). Do not delete a package's data or uninstall the hosting package while relying on private state stored there.
 
 ## Validation boundaries
 
