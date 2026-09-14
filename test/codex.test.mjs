@@ -85,7 +85,9 @@ test('Windows workspace profile applies exact read/write grants on start, resume
     const literalCommand = params.developerInstructions.split('```cmd\n')[1].split('\n```')[0];
     assert.ok(literalCommand.startsWith('call '));
     assert.ok(literalCommand.includes(nodeExecutable));
-    assert.ok(literalCommand.endsWith(' --preserve-symlinks --preserve-symlinks-main --test'));
+    assert.ok(literalCommand.endsWith(' --test'));
+    assert.equal(literalCommand.includes('--preserve-symlinks'), false);
+    assert.ok(params.developerInstructions.includes('NODE_OPTIONS to --preserve-symlinks --preserve-symlinks-main'));
     if (/^[A-Za-z]:\\[A-Za-z0-9_.\\-]+$/.test(nodeExecutable)) assert.equal(literalCommand.includes('"'), false);
     assert.ok(params.developerInstructions.includes('do not request approval or escalation'));
     assert.ok(params.developerInstructions.includes('Atlas for host validation'));
@@ -202,6 +204,28 @@ test('a changed trusted executable fails before app-server spawn', { skip: proce
 
 test('non-Windows child environment preserves case-sensitive names', () => {
   assert.deepEqual(codexEnvironment({ PATH: 'upper', Path: 'mixed', ENIGMA_TOKEN: 'private' }, 'linux'), { PATH: 'upper', Path: 'mixed' });
+});
+
+test('Windows workspace children replace inherited Node preload options without changing parent or doctor', { skip: process.platform !== 'win32' }, async t => {
+  const inherited = '--require C:\\private\\untrusted-preload.cjs --inspect=0';
+  const prior = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = inherited;
+  t.after(() => {
+    if (prior === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = prior;
+  });
+  const scoped = harness(undefined, { workspace: { path: cwd, gitCommonDir: join(cwd, 'repo', '.git') } });
+  const unscoped = harness();
+  t.after(() => scoped.client.close());
+  t.after(() => unscoped.client.close());
+  await scoped.client.start();
+  await unscoped.client.start();
+  assert.equal(scoped.spawnOptions.env.NODE_OPTIONS, '--preserve-symlinks --preserve-symlinks-main');
+  assert.deepEqual(Object.keys(scoped.spawnOptions.env).filter(key => key.toUpperCase() === 'NODE_OPTIONS'), ['NODE_OPTIONS']);
+  assert.equal(unscoped.spawnOptions.env.NODE_OPTIONS, inherited);
+  assert.equal(process.env.NODE_OPTIONS, inherited);
+  assert.equal(scoped.client.workspace.profile.network.enabled, false);
+  assert.equal(scoped.client.workspace.profile.filesystem[nodeDirectory], undefined);
 });
 
 test('handshake runs once, disables shell, forces subscription auth and strips secrets', async t => {

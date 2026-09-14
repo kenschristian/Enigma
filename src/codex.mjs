@@ -106,11 +106,18 @@ export class CodexClient {
       if (this.workspace && trustedNodeExecutable() !== this.workspace.nodeExecutable) {
         throw safeError('CODEX_NODE_RUNTIME', 'The trusted Node executable changed before startup. No work was started.');
       }
+      const environment = codexEnvironment();
+      if (this.workspace) {
+        // Plain Node commands must inherit the proven loader behavior. Replace
+        // inherited preload/options entirely; never mutate the bridge environment.
+        for (const key of Object.keys(environment)) if (key.toUpperCase() === 'NODE_OPTIONS') delete environment[key];
+        environment.NODE_OPTIONS = '--preserve-symlinks --preserve-symlinks-main';
+      }
       const overrides = Object.entries(this.policyConfig).flatMap(([key, value]) => ['-c', `${key}=${toml(value)}`]);
       this.child = this.spawnFn(this.command, [...this.args, 'app-server', '--listen', 'stdio://', ...overrides], {
         cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true,
         // Auth comes only from the existing Codex ChatGPT login. Do not inherit API credentials.
-        env: codexEnvironment(),
+        env: environment,
       });
       this.childExit = new Promise(resolve => {
         this.child.once('exit', () => { resolve(); this.fail(safeError('CODEX_EXIT', 'Codex app-server exited before the operation finished.')); });
@@ -291,7 +298,7 @@ export class CodexClient {
           ...(threadId ? { threadId, excludeTurns: true } : {}), cwd, model, modelProvider: 'openai',
           approvalPolicy: 'on-request', approvalsReviewer: 'user',
           ...(this.workspace ? { permissions: PROFILE_ID, runtimeWorkspaceRoots: [this.workspace.path] } : { sandbox: 'workspace-write' }),
-          developerInstructions: this.workspace ? `${instructions}\n\nFor Node checks use the trusted executable with shell C:\\Windows\\System32\\cmd.exe, login:false and the supplied absolute workdir. Preserve loader symlinks to avoid Node realpath traversal through private package ancestors. Copy this cmd command literally; do not add quotes or backslash escapes:\n\`\`\`cmd\ncall ${/^[A-Za-z]:\\[A-Za-z0-9_.\\-]+$/.test(this.workspace.nodeExecutable) ? this.workspace.nodeExecutable : `"${this.workspace.nodeExecutable}"`} --preserve-symlinks --preserve-symlinks-main --test\n\`\`\`\nAn explicit test-file path may follow --test. Keep normal test-process isolation. Only the executable file has extra read access. If any test or quoted-path invocation remains blocked, do not request approval or escalation, retry outside the sandbox, or read private parent folders. Report the command and failure to Atlas for host validation, preserve all work, and leave the task recoverable.` : instructions,
+          developerInstructions: this.workspace ? `${instructions}\n\nFor Node checks use the trusted executable with shell C:\\Windows\\System32\\cmd.exe, login:false and the supplied absolute workdir. The workspace child environment already sets NODE_OPTIONS to --preserve-symlinks --preserve-symlinks-main to avoid Node loader realpath traversal through private package ancestors. Keep that environment intact; plain Node commands inherit both flags. Copy this cmd command literally; do not add quotes or backslash escapes:\n\`\`\`cmd\ncall ${/^[A-Za-z]:\\[A-Za-z0-9_.\\-]+$/.test(this.workspace.nodeExecutable) ? this.workspace.nodeExecutable : `"${this.workspace.nodeExecutable}"`} --test\n\`\`\`\nAn explicit test-file path may follow --test. Keep normal test-process isolation. Only the executable file has extra read access. If any test or quoted-path invocation remains blocked, do not request approval or escalation, retry outside the sandbox, or read private parent folders. Report the command and failure to Atlas for host validation, preserve all work, and leave the task recoverable.` : instructions,
           config: { ...config, ...this.policyConfig, model, model_reasoning_effort: effort },
         };
         const result = await this.request(threadId ? 'thread/resume' : 'thread/start', params);
