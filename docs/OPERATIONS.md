@@ -18,6 +18,8 @@ The startup task name is `EnigmaAgents-` followed by your Windows SID. You can i
 
 The wrapper holds an exclusive lock on the configured state directory. A second runner using that directory exits without starting another bridge. Task Scheduler also uses `IgnoreNew`. Restarting may interrupt active coding work; use `@Atlas status` and `@Atlas resume <task-id>` to continue deliberately. Existing worktrees are preserved. Do not delete or reset a worktree to resolve an interruption.
 
+The wrapper records nonsecret process identity in `runner-process.json` beside the private configuration. Restart verifies the recorded process and captures its child processes before stopping them, then starts a replacement only after cleanup succeeds. A running legacy version without a record needs a one-time locally verified upgrade. An absent or mismatched recorded process, or incomplete cleanup, requires local inspection; do not delete the record or stop processes by name to bypass that check. Ordinary Windows reboot/logon startup can replace a stale record while retaining saved tasks and credentials.
+
 Only events received and persisted locally can be recovered. There is no promise to replay messages sent while the computer is asleep, offline, signed out, or stopped. Resend the request when connected if it was never acknowledged. A task accepted before a crash may have partially completed changes; review those before resuming.
 
 The computer must be awake, online, and signed in for the startup runner to work. If three restart attempts fail, fix the underlying issue and run `Restart-Agents.ps1`. That script checks that the scheduled runner remains active; a successful Slack response confirms connectivity.
