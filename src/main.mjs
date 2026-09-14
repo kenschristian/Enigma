@@ -10,6 +10,7 @@ import { TaskStore } from './store.mjs';
 import { WorktreeManager } from './worktrees.mjs';
 import { SlackConnection } from './slack.mjs';
 import { AgentService } from './service.mjs';
+import { configuredProjects, resolveProject } from './projects.mjs';
 
 export async function doctor(config, { log = console.log, Client = CodexClient } = {}) {
   const client = new Client({ command: config?.codexCommand || 'codex', cwd: config?.repoPath || process.cwd() });
@@ -25,11 +26,12 @@ export async function doctor(config, { log = console.log, Client = CodexClient }
     if (!efforts.includes('ultra') || !efforts.includes('high')) throw new Error('This Codex runtime does not expose both Astra Ultra and High. No setting was substituted.');
     log('PASS: GPT-6 Astra supports Ultra for Atlas and High for specialists.');
     if (config) {
-      const worktrees = new WorktreeManager(config);
-      await worktrees.inspect();
-      log('PASS: Git repository has a committed starting point.');
+      for (const project of configuredProjects(config)) {
+        await new WorktreeManager(project).inspect();
+        log(`PASS: ${project.key} repository has a committed starting point.`);
+      }
       for (const bot of config.bots) {
-        const connection = new SlackConnection({ bot, teamId: config.allowedTeamId });
+        const connection = new SlackConnection({ bot, teamId: config.allowedTeamId, allowedUserIds: config.allowedUserIds });
         try { await connection.start(); } finally { connection.stop(); }
         log(`PASS: ${bot.key} belongs to the configured Slack workspace.`);
       }
@@ -57,11 +59,14 @@ export async function start(config) {
   };
   try {
     store = new TaskStore(path.join(config.stateDir, 'tasks.db'));
-    service = new AgentService({ config, store, worktrees: new WorktreeManager(config), connections,
-      clientFactory: () => new CodexClient({ command: config.codexCommand, cwd: config.repoPath }), log });
+    const managers = new Map(configuredProjects(config).map(project => [project.key, new WorktreeManager(project)]));
+    service = new AgentService({ config, store, connections,
+      worktreesFor: task => managers.get(resolveProject(config, task.channel).key),
+      clientFactory: (_task, worktree) => new CodexClient({ command: config.codexCommand, cwd: worktree.path,
+        workspace: { path: worktree.path, gitCommonDir: worktree.gitCommonDir } }), log });
     await doctor(config, { log });
     for (const bot of config.bots) {
-      const connection = new SlackConnection({ bot, teamId: config.allowedTeamId, onEnvelope: (payload, source) => service.receive(payload, source) });
+      const connection = new SlackConnection({ bot, teamId: config.allowedTeamId, allowedUserIds: config.allowedUserIds, onEnvelope: (payload, source) => service.receive(payload, source) });
       connection.on('warning', log);
       connections.set(bot.key, connection);
       await connection.start();

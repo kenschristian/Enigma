@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Enigma Forge",
+    "name": "Forge - Back End Engineer",
     "background_color": "#172235",
-    "description": "Private Slack-to-Codex coding assistant"
+    "description": "Back End Engineer — business logic, databases, migrations and background jobs."
   },
   "features": {
     "bot_user": {
-      "display_name": "Forge",
+      "display_name": "Forge - Back End Engineer",
       "always_online": false
     }
   },

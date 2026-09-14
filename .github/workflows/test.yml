@@ -28,3 +28,9 @@ jobs:
       - name: PowerShell 7 setup checks
         shell: pwsh
         run: .\scripts\Test-Scripts.ps1 -PrivateDirectoryAcl
+      - name: Windows PowerShell startup recovery checks
+        shell: powershell
+        run: .\scripts\Test-Startup.ps1
+      - name: PowerShell 7 startup recovery checks
+        shell: pwsh
+        run: .\scripts\Test-Startup.ps1

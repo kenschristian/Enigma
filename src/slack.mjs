@@ -27,9 +27,11 @@ export function splitMessage(text, length = 3500) {
 }
 
 export class SlackConnection extends EventEmitter {
-  constructor({ bot, teamId, env = process.env, api = slackApi, WebSocketClass = WebSocket, onEnvelope }) {
+  constructor({ bot, teamId, env = process.env, api = slackApi, WebSocketClass = WebSocket, onEnvelope, allowedUserIds = [] }) {
     super();
     Object.assign(this, { bot, teamId, api, WebSocketClass, onEnvelope });
+    if (!Array.isArray(allowedUserIds)) throw new SlackError('invalid_notification_allowlist');
+    this.allowedUserIds = new Set(allowedUserIds);
     this.botToken = env[bot.botTokenEnv]; this.appToken = env[bot.appTokenEnv];
     this.stopped = true; this.reconnectAttempts = 0; this.botUserId = null;
   }
@@ -86,10 +88,24 @@ export class SlackConnection extends EventEmitter {
     }, delay);
   }
 
-  async post({ channel, threadTs, text, id }) {
+  async post({ channel, threadTs, text, id, notifyUserId = null, prUrl = null }) {
+    let mrkdwn = false;
+    if (notifyUserId !== null) {
+      if (typeof notifyUserId !== 'string' || !/^[UW][A-Z0-9]+$/.test(notifyUserId) || !this.allowedUserIds.has(notifyUserId)) {
+        throw new SlackError('notification_user_not_allowed');
+      }
+    }
+    if (prUrl !== null && (typeof prUrl !== 'string' || prUrl.trim() !== prUrl || !/^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!(?:\.|\.\.)\/)[A-Za-z0-9_.-]{1,100}\/pull\/[1-9][0-9]{0,19}$/.test(prUrl))) {
+      throw new SlackError('invalid_pull_request_url');
+    }
+    if (notifyUserId !== null || prUrl !== null) {
+      const body = String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      text = `${notifyUserId !== null ? `<@${notifyUserId}>\n` : ''}${body}${prUrl !== null ? `\n\n<${prUrl}|Open pull request>` : ''}`;
+      mrkdwn = true;
+    }
     return this.api('chat.postMessage', this.botToken, {
       channel, thread_ts: threadTs, text, client_msg_id: id,
-      mrkdwn: false, parse: 'none', unfurl_links: false, unfurl_media: false,
+      mrkdwn, parse: 'none', link_names: false, unfurl_links: false, unfurl_media: false,
     });
   }
 

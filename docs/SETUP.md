@@ -79,6 +79,14 @@ Create three more Slack apps from `nova.json`, `forge.json`, and `bridge.json`, 
 
 This replaces the active bot configuration and asks for all four pairs of tokens. Reinstall startup after doctor passes. Direct mentions route to that identity; the single Atlas app already supports `nova:`, `forge:`, and `bridge:` prefixes, so four apps are optional. All work shares the same configured concurrency limit (one by default).
 
-## Optional: Greptile review
+## Multiple projects
 
-Use an existing Greptile GitHub installation on `kenschristian/Enigma` if it is already available and authorized. This bridge does not install Greptile, provision provider credentials, or bypass GitHub protections. Atlas prepares the reviewable pull request; you perform the final Merge action.
+One Atlas app can serve separate private project channels. Stop the runner before editing its private `config.json`. Keep the existing `repoPath` for compatibility, and add `projects` entries with a unique `key`, absolute `repoPath`, and `channelIds` array. When project mappings are present, every `allowedChannelIds` entry must belong to exactly one project. All projects share the existing private worktree root; adding a project does not move saved conversations.
+
+Use `enigma-work`, `enigma-pull-requests`, `enigma-code-review`, and `enigma-updates` for Enigma, with the same suffixes under `jarvis-` for Jarvis. Use explicit channel IDs and invite Atlas to each private channel. Each conversation runs against its channel's configured repository. Give each project a dedicated source checkout so another task's branch changes do not change the starting point for new Slack conversations. Refresh that checkout safely from the intended release branch before starting new work; preserve existing conversations and branches.
+
+## Greptile review
+
+Use the existing Greptile GitHub installation for the configured repositories. Completed changes become Ready for Review PRs, receive one initial Greptile review, and get tested repairs without requesting another review. You perform the final Merge action. See [the review workflow](REVIEW-WORKFLOW.md) and [monitor operating prompt](REVIEW-MONITOR.md).
+
+A separately activated Codex heartbeat checks GitHub on its configured schedule and coordinates repairs and durable Slack notices. It requires Codex to remain open on an awake, connected computer. The Slack runner's Windows startup task and the Codex heartbeat are separate: a saved policy file alone does not activate monitoring. Existing Greptile access and account allowance must be available; the bridge never purchases a subscription or creates provider credentials.

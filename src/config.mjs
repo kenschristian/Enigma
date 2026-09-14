@@ -14,9 +14,38 @@ export function validateConfig(value, { env = process.env, requireTokens = true 
     if (typeof c[key] !== 'string' || !path.isAbsolute(c[key])) fail(`${key} must be an absolute folder path.`);
     c[key] = path.resolve(c[key]);
   }
+  if (!/^T[A-Z0-9]+$/.test(c.allowedTeamId)) fail('enter the Slack workspace ID (starts with T).');
+  for (const [key, pattern] of [['allowedUserIds', /^[UW][A-Z0-9]+$/], ['allowedChannelIds', /^[CG][A-Z0-9]+$/]]) {
+    if (!Array.isArray(c[key]) || !c[key].length || c[key].some(v => typeof v !== 'string' || !pattern.test(v))) fail(`${key} must contain explicit Slack IDs.`);
+  }
+  if (c.projects !== undefined) {
+    if (!Array.isArray(c.projects) || !c.projects.length) fail('projects must be a nonempty array when provided.');
+    const projectKeys = new Set(), assignedChannels = new Set();
+    for (const project of c.projects) {
+      if (!project || typeof project !== 'object' || Array.isArray(project) ||
+          typeof project.key !== 'string' || !/^[a-z][a-z0-9_-]{0,30}$/.test(project.key) || projectKeys.has(project.key)) {
+        fail('project keys must be unique short lowercase names.');
+      }
+      projectKeys.add(project.key);
+      if (typeof project.repoPath !== 'string' || !path.isAbsolute(project.repoPath)) fail('each project repoPath must be an absolute folder path.');
+      project.repoPath = path.resolve(project.repoPath);
+      if (!Array.isArray(project.channelIds) || !project.channelIds.length ||
+          project.channelIds.some(id => typeof id !== 'string' || !/^[CG][A-Z0-9]+$/.test(id))) {
+        fail('each project channelIds must contain explicit Slack IDs.');
+      }
+      for (const channel of project.channelIds) {
+        if (!c.allowedChannelIds.includes(channel)) fail('project channels must be in allowedChannelIds.');
+        if (assignedChannels.has(channel)) fail('project channels must be unique across all project mappings.');
+        assignedChannels.add(channel);
+      }
+    }
+    if (c.allowedChannelIds.some(channel => !assignedChannels.has(channel))) fail('every allowed channel must map to exactly one project.');
+  }
   for (const key of ['stateDir', 'worktreesRoot']) {
-    const relative = path.relative(c.repoPath, c[key]);
-    if (!relative || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) fail(`${key} must be outside the repository.`);
+    for (const repoPath of [c.repoPath, ...(c.projects ?? []).map(project => project.repoPath)]) {
+      const relative = path.relative(repoPath, c[key]);
+      if (!relative || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) fail(`${key} must be outside the repository.`);
+    }
     if (c[key].split(/[\\/]/).some(p => /^onedrive(?:\s*-.*)?$/i.test(p))) fail(`${key} must be outside OneDrive.`);
     if (env.LOCALAPPDATA) {
       const local = path.relative(path.resolve(env.LOCALAPPDATA), c[key]);
@@ -29,10 +58,6 @@ export function validateConfig(value, { env = process.env, requireTokens = true 
     for (let part = c[key]; part !== path.dirname(part); part = path.dirname(part)) {
       if (existsSync(part) && lstatSync(part).isSymbolicLink()) fail(`${key} must not use links or junctions.`);
     }
-  }
-  if (!/^T[A-Z0-9]+$/.test(c.allowedTeamId)) fail('enter the Slack workspace ID (starts with T).');
-  for (const [key, pattern] of [['allowedUserIds', /^[UW][A-Z0-9]+$/], ['allowedChannelIds', /^[CG][A-Z0-9]+$/]]) {
-    if (!Array.isArray(c[key]) || !c[key].length || c[key].some(v => typeof v !== 'string' || !pattern.test(v))) fail(`${key} must contain explicit Slack IDs.`);
   }
   c.maxConcurrent ??= 1;
   c.taskTimeoutMinutes ??= 45;

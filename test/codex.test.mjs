@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-import { CodexClient } from '../src/codex.mjs';
+import { join } from 'node:path';
+import { CodexClient, codexEnvironment } from '../src/codex.mjs';
 
 const cwd = process.cwd();
 const options = { cwd, model: 'gpt-6-astra', effort: 'ultra', prompt: 'Build it.' };
@@ -29,8 +30,13 @@ function harness(handler = () => false, clientOptions = {}) {
         if (message.method === 'initialize') respond(message, { userAgent: 'codex' });
         if (message.method === 'account/read') respond(message, { account: { type: 'chatgpt', email: 'private@example.com', planType: 'pro', token: 'secret' }, requiresOpenaiAuth: true });
         if (message.method === 'model/list') respond(message, { data: [model], nextCursor: null });
+        if (message.method === 'config/read') respond(message, { config: { permissions: {
+          enigma_workspace: { ...client.workspace.profile, extends: null, workspace_roots: null, description: null },
+        } } });
         if (['thread/start', 'thread/resume'].includes(message.method)) respond(message, {
           thread: { id: message.params.threadId ?? 'thread-1' }, model: 'gpt-6-astra', modelProvider: 'openai',
+          ...(message.params.permissions ? { activePermissionProfile: { id: message.params.permissions, extends: null },
+            runtimeWorkspaceRoots: message.params.runtimeWorkspaceRoots } : {}),
         });
         if (message.method === 'turn/start') respond(message, { turn: { id: 'turn-1', status: 'inProgress', items: [] } });
       });
@@ -46,6 +52,113 @@ function harness(handler = () => false, clientOptions = {}) {
 const finish = (notify, { threadId = 'thread-1', turnId = 'turn-1', text = 'Done.', status = 'completed' } = {}) =>
   notify('turn/completed', { threadId, turn: { id: turnId, status, items: [{ type: 'agentMessage', id: 'answer', text, phase: 'final_answer' }] } });
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('Windows workspace profile applies exact read/write grants on start, resume and turn', { skip: process.platform !== 'win32' }, async t => {
+  const workspace = { path: cwd, gitCommonDir: join(cwd, 'fixture-repo', '.git') };
+  const h = harness((message, { respond }) => {
+    if (message.method !== 'turn/start') return false;
+    respond(message, { turn: { id: 'turn-1', status: 'completed', items: [] } }); return true;
+  }, { workspace }); t.after(() => h.client.close());
+  workspace.path = join(cwd, 'mutated');
+  await h.client.run({ ...options, config: { 'agents.enabled': true } });
+  await h.client.run({ ...options, threadId: 'thread-1' });
+  assert.equal(h.sent[0].params.capabilities.experimentalApi, true);
+  assert.equal(h.spawnOptions.cwd, cwd);
+  assert.ok(h.spawnArgs.includes('default_permissions="enigma_workspace"'));
+  assert.ok(h.spawnArgs.includes('windows.sandbox="elevated"'));
+  assert.equal(h.spawnArgs.some(arg => /^sandbox_(mode|workspace_write)/.test(arg)), false);
+  const starts = h.sent.filter(message => ['thread/start', 'thread/resume'].includes(message.method));
+  for (const { params } of starts) {
+    assert.equal(params.permissions, 'enigma_workspace');
+    assert.deepEqual(params.runtimeWorkspaceRoots, [cwd]);
+    assert.equal(params.sandbox, undefined);
+    assert.equal(params.config.sandbox_mode, undefined);
+    assert.deepEqual(params.config['permissions.enigma_workspace'], { filesystem: {
+      ':minimal': 'read', [cwd]: 'write', [join(cwd, 'fixture-repo', '.git')]: 'read',
+      [join(cwd, '.git')]: 'read', [join(cwd, '.codex')]: 'read', [join(cwd, '.agents')]: 'read',
+    }, network: { enabled: false } });
+  }
+  assert.equal(starts[1].params.excludeTurns, true);
+  for (const { params } of h.sent.filter(message => message.method === 'turn/start')) {
+    assert.equal(params.permissions, 'enigma_workspace');
+    assert.deepEqual(params.runtimeWorkspaceRoots, [cwd]);
+    assert.equal(params.sandboxPolicy, undefined);
+  }
+});
+
+test('Windows workspace binding rejects changed cwd and caller policy overrides before spawning', { skip: process.platform !== 'win32' }, async () => {
+  const workspace = { path: cwd, gitCommonDir: join(cwd, 'repo', '.git') };
+  const h = harness(undefined, { workspace });
+  await assert.rejects(h.client.run({ ...options, cwd: join(cwd, 'other') }), { code: 'CODEX_PROFILE' });
+  for (const key of ['permissions', 'permissions.enigma_workspace.filesystem', 'default_permissions', 'sandbox_mode',
+    'sandbox_workspace_write.network_access', 'windows.sandbox', 'approval_policy', 'approvals_reviewer', 'model_provider', 'forced_login_method']) {
+    await assert.rejects(h.client.run({ ...options, config: { [key]: 'unsafe' } }), { code: 'CODEX_PROFILE' });
+  }
+  assert.equal(h.sent.length, 0);
+  assert.throws(() => harness(undefined, { workspace, cwd: join(cwd, 'other') }), TypeError);
+  assert.throws(() => harness(undefined, { workspace, args: ['-c', 'sandbox_mode="danger-full-access"'] }), TypeError);
+  for (const invalid of [{}, { path: 'relative', gitCommonDir: cwd }, { path: cwd, gitCommonDir: 'C:\\' }, { path: cwd, gitCommonDir: `${cwd}\n` }]) {
+    assert.throws(() => harness(undefined, { workspace: invalid }), TypeError);
+  }
+});
+
+test('Windows profile confirmation fails closed for absent, substituted or broadened profiles and roots', { skip: process.platform !== 'win32' }, async t => {
+  for (const changes of [
+    { activePermissionProfile: null }, { activePermissionProfile: { id: 'full-access', extends: null } },
+    { activePermissionProfile: { id: 'enigma_workspace', extends: 'workspace' } },
+    { runtimeWorkspaceRoots: [] }, { runtimeWorkspaceRoots: [cwd, join(cwd, 'other')] }, { runtimeWorkspaceRoots: [join(cwd, 'other')] },
+  ]) {
+    const h = harness((message, { respond }) => {
+      if (!['thread/start', 'thread/resume'].includes(message.method)) return false;
+      respond(message, { thread: { id: 'thread-1' }, model: 'gpt-6-astra', modelProvider: 'openai',
+        activePermissionProfile: { id: 'enigma_workspace', extends: null }, runtimeWorkspaceRoots: [cwd], ...changes }); return true;
+    }, { workspace: { path: cwd, gitCommonDir: join(cwd, 'repo', '.git') } }); t.after(() => h.client.close());
+    await assert.rejects(h.client.run(options), { code: 'CODEX_PROFILE' });
+    assert.equal(h.sent.some(message => message.method === 'turn/start'), false);
+    assert.equal(h.child.killed, true);
+  }
+});
+
+test('unsupported Windows profile RPC never retries with a legacy sandbox', { skip: process.platform !== 'win32' }, async t => {
+  const h = harness((message, { emit }) => {
+    if (message.method !== 'thread/start') return false;
+    emit({ id: message.id, error: { code: -32600, message: 'Unsupported profile' } }); return true;
+  }, { workspace: { path: cwd, gitCommonDir: join(cwd, 'repo', '.git') } }); t.after(() => h.client.close());
+  await assert.rejects(h.client.run(options), { code: 'CODEX_RPC' });
+  assert.equal(h.sent.filter(message => message.method === 'thread/start').length, 1);
+  assert.equal(h.sent.some(message => message.method === 'turn/start'), false);
+});
+
+test('effective Windows profile rejects inherited roots and network access before thread creation', { skip: process.platform !== 'win32' }, async t => {
+  for (const mutation of [
+    profile => { profile.filesystem['C:\\private-state'] = 'read'; },
+    profile => { profile.network.enabled = true; },
+    profile => { profile.extends = 'workspace'; },
+    profile => { profile.workspace_roots = ['C:\\']; },
+    profile => { profile.filesystem[join(cwd, 'repo', '.git')] = 'write'; },
+  ]) {
+    const h = harness((message, { respond }) => {
+      if (message.method !== 'config/read') return false;
+      const profile = structuredClone(h.client.workspace.profile); mutation(profile);
+      respond(message, { config: { permissions: { enigma_workspace: profile } } }); return true;
+    }, { workspace: { path: cwd, gitCommonDir: join(cwd, 'repo', '.git') } }); t.after(() => h.client.close());
+    await assert.rejects(h.client.run(options), { code: 'CODEX_PROFILE' });
+    assert.equal(h.sent.some(message => message.method === 'thread/start'), false);
+    assert.equal(h.child.killed, true);
+  }
+});
+
+test('Windows child environment normalizes PATH, deduplicates names and strips credentials', () => {
+  const source = { Path: 'legacy-path', PATH: 'selected-path', TEMP: 'selected-temp', temp: 'duplicate-temp', SystemRoot: 'C:\\Windows', enigma_slack_token: 'private', OpenAI_Api_Key: 'private', CODEX_API_KEY: 'private' };
+  const normalized = codexEnvironment(source, 'win32');
+  assert.deepEqual(normalized, { PATH: 'selected-path', SystemRoot: 'C:\\Windows', TEMP: 'selected-temp' });
+  assert.equal(source.Path, 'legacy-path', 'the parent environment must remain unchanged');
+  assert.deepEqual(codexEnvironment({ Path: 'existing-search-path' }, 'win32'), { PATH: 'existing-search-path' });
+});
+
+test('non-Windows child environment preserves case-sensitive names', () => {
+  assert.deepEqual(codexEnvironment({ PATH: 'upper', Path: 'mixed', ENIGMA_TOKEN: 'private' }, 'linux'), { PATH: 'upper', Path: 'mixed' });
+});
 
 test('handshake runs once, disables shell, forces subscription auth and strips secrets', async t => {
   const previousSecret = process.env.ENIGMA_TEST_PRIVATE;
@@ -63,6 +176,9 @@ test('handshake runs once, disables shell, forces subscription auth and strips s
   assert.ok(h.spawnArgs.includes('forced_login_method="chatgpt"'));
   assert.equal(h.spawnOptions.env.OPENAI_API_KEY, undefined);
   assert.equal(h.spawnOptions.env.ENIGMA_TEST_PRIVATE, undefined);
+  if (process.platform === 'win32') {
+    assert.equal(Object.keys(h.spawnOptions.env).some(key => key.toUpperCase() === 'PATH' && key !== 'PATH'), false);
+  }
   assert.deepEqual(await h.client.account(), { account: { type: 'chatgpt', planType: 'pro' }, requiresOpenaiAuth: true });
   assert.deepEqual(await h.client.models(), [model]);
 });

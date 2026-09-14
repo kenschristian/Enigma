@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { TaskStore } from '../src/store.mjs';
 import { AgentService } from '../src/service.mjs';
 
-const config = {allowedTeamId:'T1',allowedUserIds:['U1'],allowedChannelIds:['C1'],maxConcurrent:1,taskTimeoutMinutes:1};
+const config = {allowedTeamId:'T1',allowedUserIds:['U1'],allowedChannelIds:['C1'],bots:[{key:'atlas',role:'atlas'}],maxConcurrent:1,taskTimeoutMinutes:1};
 const connection = {bot:{key:'atlas',role:'atlas'},botUserId:'UBOT'};
 const event = (id, text, thread='1.1', user='U1') => ({type:'event_callback',team_id:'T1',event_id:id,event:{type:'app_mention',user,channel:'C1',text:`<@UBOT> ${text}`,ts:`${id.replace(/\D/g,'')||1}.1`,thread_ts:thread}});
 function fixture(options = {}) {
@@ -12,6 +12,7 @@ function fixture(options = {}) {
   const calls = [];
   const service = new AgentService({ config:{...config,...options.config},store,
     worktrees:{ensure:async key=>({path:`C:/work/${key}`,branch:'codex/test'})},
+    worktreesFor:options.worktreesFor,
     clientFactory:options.clientFactory || (()=>({start:async()=>{},close:async()=>{},run:async params=>{calls.push(params);await params.onThread('thread-1');return {status:'completed',text:'Done',threadId:'thread-1'};}})),
     connections:options.connections || new Map() });
   return {store,service,calls};
@@ -44,7 +45,7 @@ test('same conversation serializes while unrelated tasks run concurrently',async
 });
 test('restart marks running work interrupted and pauses follow-ups until explicit resume',async()=>{
   const {store,service,calls}=fixture();
-  service.receive(event('E1','one'),connection);const original=store.list()[0];store.update(original.id,{status:'running',codexThreadId:'saved-thread'});
+  service.receive(event('E1','one'),connection);const original=store.list()[0];store.update(original.id,{status:'running',codexThreadId:'saved-thread',worktreePath:`C:/work/${original.conversationKey}`,branch:'codex/test'});
   service.receive(event('E2','two'),connection);
   service.start();await delay(5);
   assert.equal(store.get(original.id).status,'interrupted');assert.equal(calls.length,0);
@@ -77,4 +78,40 @@ test('results are saved before delivery and failed delivery retries without reru
   service.receive(event('E1','one'),connection);service.pump();await drained(service);
   assert.equal(store.list()[0].result,'Done');await service.flush();service.pump();await drained(service);
   assert.equal(calls.length,1);assert.equal(store.list()[0].status,'completed');store.close();
+});
+
+test('project channels choose their own repository and keep saved conversations separate',async()=>{
+  const selected=[],calls=[];
+  const {store,service}=fixture({config:{allowedChannelIds:['C1','C2']},
+    worktreesFor:task=>({ensure:async key=>{selected.push({channel:task.channel,key});return {path:`C:/work/${task.channel}`,branch:`codex/${task.channel}`,gitCommonDir:`C:/repos/${task.channel}/.git`};}}),
+    clientFactory:(task,worktree)=>{
+      assert.equal(worktree.path,`C:/work/${task.channel}`);
+      assert.equal(worktree.gitCommonDir,`C:/repos/${task.channel}/.git`);
+      return {start:async()=>{},close:async()=>{},run:async params=>{calls.push({...params,channel:task.channel});params.onThread(`saved-${task.channel}`);return {status:'completed',text:'Done'};}};
+    }});
+  service.receive(event('E1','Enigma work'),connection);
+  const jarvis=event('E2','Jarvis work');jarvis.event.channel='C2';
+  service.receive(jarvis,connection);service.pump();await drained(service);service.pump();await drained(service);
+  const followup=event('E3','Continue Jarvis');followup.event.channel='C2';
+  service.receive(followup,connection);service.pump();await drained(service);
+  assert.deepEqual(calls.map(c=>c.cwd),['C:/work/C1','C:/work/C2','C:/work/C2']);
+  assert.equal(calls[1].threadId,undefined);assert.equal(calls[2].threadId,'saved-C2');
+  assert.notEqual(selected[0].key,selected[1].key);store.close();
+});
+
+test('an unavailable project mapping fails before any Codex client starts',async()=>{
+  let constructed=false;
+  const {store,service}=fixture({worktreesFor:()=>{throw new Error('Project unavailable');},clientFactory:()=>{constructed=true;}});
+  service.receive(event('E1','work'),connection);service.pump();await drained(service);
+  assert.equal(constructed,false);assert.equal(store.list()[0].status,'failed');store.close();
+});
+
+test('durable review recipient and PR link reach Slack delivery together',async()=>{
+  const sent=[];
+  const {store,service}=fixture({connections:new Map([['atlas',{post:async payload=>{sent.push(payload);}}]])});
+  const notice=store.addOutbox({botKey:'atlas',channel:'C1',text:'Ready for review',notifyUserId:'U1',prUrl:'https://github.com/owner/repository/pull/7'});
+  await service.flush();
+  assert.equal(sent.length,1);assert.equal(sent[0].notifyUserId,'U1');
+  assert.equal(sent[0].prUrl,'https://github.com/owner/repository/pull/7');
+  assert.equal(sent[0].id,notice.id);assert.equal(store.pendingOutbox().length,0);store.close();
 });

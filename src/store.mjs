@@ -8,6 +8,11 @@ const metadata = ['codexThreadId', 'worktreePath', 'branch'];
 const mutable = new Set(['status', ...metadata, 'result', 'error']);
 const fields = ['eventId', 'conversationKey', 'role', 'prompt', 'channel', 'slackThreadTs', 'userId', 'teamId', 'botKey'];
 const decode = (row) => row ? JSON.parse(row.data) : null;
+const decodeTask = (row) => {
+  const task = decode(row);
+  if (task) task.projectIdentity ??= null;
+  return task;
+};
 
 function limitValue(value) {
   if (!Number.isInteger(value) || value < 1 || value > 1000) throw new Error('Invalid result limit');
@@ -43,6 +48,8 @@ export class TaskStore {
         botKey TEXT NOT NULL,
         channel TEXT NOT NULL,
         threadTs TEXT,
+        notifyUserId TEXT,
+        prUrl TEXT,
         text TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,
         createdAt INTEGER NOT NULL,
@@ -52,6 +59,17 @@ export class TaskStore {
       CREATE INDEX IF NOT EXISTS outbox_destination ON outbox(botKey, channel, threadTs, sequence)
         WHERE deliveredAt IS NULL;
     `);
+    // Serialize discovery and migration with other runner/helper processes.
+    // Existing queued messages retain every field; new metadata defaults to null.
+    this.transaction(() => {
+      const columns = this.db.prepare('PRAGMA table_info(outbox)').all();
+      if (!columns.some(column => column.name === 'notifyUserId')) {
+        this.db.exec('ALTER TABLE outbox ADD COLUMN notifyUserId TEXT');
+      }
+      if (!columns.some(column => column.name === 'prUrl')) {
+        this.db.exec('ALTER TABLE outbox ADD COLUMN prUrl TEXT');
+      }
+    });
   }
 
   transaction(fn) {
@@ -70,12 +88,15 @@ export class TaskStore {
     for (const field of fields) {
       if (typeof input[field] !== 'string' || !input[field]) throw new Error(`Missing task field: ${field}`);
     }
+    if (input.projectIdentity !== undefined && (typeof input.projectIdentity !== 'string' || !input.projectIdentity.trim() || input.projectIdentity.length > 1024)) {
+      throw new Error('Invalid task project identity');
+    }
     return this.transaction(() => {
-      const previous = decode(this.db.prepare('SELECT data FROM tasks WHERE event_id = ?').get(input.eventId));
+      const previous = decodeTask(this.db.prepare('SELECT data FROM tasks WHERE event_id = ?').get(input.eventId));
       if (previous) return { created: false, task: previous };
       const conversation = this.conversation(input.conversationKey);
       const now = Date.now();
-      const task = { id: randomUUID(), status: 'queued', createdAt: now, updatedAt: now, result: null, error: null };
+      const task = { id: randomUUID(), status: 'queued', createdAt: now, updatedAt: now, result: null, error: null, projectIdentity: input.projectIdentity ?? null };
       for (const field of fields) task[field] = input[field];
       for (const field of metadata) task[field] = conversation?.[field] ?? null;
       this.db.prepare('INSERT INTO tasks (id, event_id, conversation_key, status, data) VALUES (?, ?, ?, ?, ?)')
@@ -85,7 +106,7 @@ export class TaskStore {
   }
 
   get(id) {
-    return decode(this.db.prepare('SELECT data FROM tasks WHERE id = ?').get(id));
+    return decodeTask(this.db.prepare('SELECT data FROM tasks WHERE id = ?').get(id));
   }
 
   list({ status, limit = 20 } = {}) {
@@ -94,18 +115,18 @@ export class TaskStore {
     const rows = status === undefined
       ? this.db.prepare('SELECT data FROM tasks ORDER BY sequence DESC LIMIT ?').all(limit)
       : this.db.prepare('SELECT data FROM tasks WHERE status = ? ORDER BY sequence DESC LIMIT ?').all(status, limit);
-    return rows.map(decode);
+    return rows.map(decodeTask);
   }
 
   nextQueued() {
-    return decode(this.db.prepare(`SELECT queued.data FROM tasks queued
+    return decodeTask(this.db.prepare(`SELECT queued.data FROM tasks queued
       WHERE queued.status = 'queued' AND NOT EXISTS (
         SELECT 1 FROM tasks active WHERE active.conversation_key = queued.conversation_key AND active.status = 'running'
       ) ORDER BY queued.sequence LIMIT 1`).get());
   }
 
   interruptedTask(conversationKey, exceptId = '') {
-    return decode(this.db.prepare("SELECT data FROM tasks WHERE conversation_key = ? AND status = 'interrupted' AND id != ? ORDER BY sequence LIMIT 1").get(conversationKey, exceptId));
+    return decodeTask(this.db.prepare("SELECT data FROM tasks WHERE conversation_key = ? AND status = 'interrupted' AND id != ? ORDER BY sequence LIMIT 1").get(conversationKey, exceptId));
   }
 
   hasLaterActiveTask(id) {
@@ -134,6 +155,10 @@ export class TaskStore {
       this.db.prepare('UPDATE tasks SET status = ?, data = ? WHERE id = ?').run(task.status, JSON.stringify(task), id);
       if (metadata.some((field) => field in patch)) {
         const saved = decode(this.db.prepare('SELECT data FROM conversations WHERE conversation_key = ?').get(task.conversationKey)) ?? {};
+        if (saved.projectIdentity && task.projectIdentity && saved.projectIdentity !== task.projectIdentity) {
+          throw Object.assign(new Error('Saved conversation belongs to another project.'), { code: 'PROJECT_MAPPING_CHANGED' });
+        }
+        saved.projectIdentity = task.projectIdentity ?? saved.projectIdentity ?? null;
         for (const field of metadata) if (field in patch) saved[field] = patch[field];
         this.db.prepare(`INSERT INTO conversations (conversation_key, data) VALUES (?, ?)
           ON CONFLICT(conversation_key) DO UPDATE SET data = excluded.data`).run(task.conversationKey, JSON.stringify(saved));
@@ -143,10 +168,13 @@ export class TaskStore {
   }
 
   conversation(key) {
-    const latest = decode(this.db.prepare('SELECT data FROM tasks WHERE conversation_key = ? ORDER BY sequence DESC LIMIT 1').get(key));
+    const latest = decodeTask(this.db.prepare('SELECT data FROM tasks WHERE conversation_key = ? ORDER BY sequence DESC LIMIT 1').get(key));
     if (!latest) return null;
     const saved = decode(this.db.prepare('SELECT data FROM conversations WHERE conversation_key = ?').get(key));
-    return Object.assign(latest, saved);
+    // The newest queued task may belong to a newly mapped project. Its identity
+    // must not relabel metadata saved by an earlier task. Older metadata remains
+    // explicitly unbound until its exact worktree has been checked by the service.
+    return Object.assign(latest, saved, { projectIdentity: saved ? saved.projectIdentity ?? null : latest.projectIdentity });
   }
 
   recoverInterrupted() {
@@ -154,7 +182,7 @@ export class TaskStore {
       const rows = this.db.prepare("SELECT data FROM tasks WHERE status = 'running'").all();
       const statement = this.db.prepare("UPDATE tasks SET status = 'interrupted', data = ? WHERE id = ?");
       for (const row of rows) {
-        const task = decode(row);
+        const task = decodeTask(row);
         task.status = 'interrupted';
         task.updatedAt = Date.now();
         statement.run(JSON.stringify(task), task.id);
@@ -163,14 +191,20 @@ export class TaskStore {
     });
   }
 
-  addOutbox({ taskId = null, botKey, channel, threadTs = null, text }) {
+  addOutbox({ taskId = null, botKey, channel, threadTs = null, text, notifyUserId = null, prUrl = null }) {
     for (const value of [botKey, channel, text]) {
       if (typeof value !== 'string' || !value) throw new Error('Invalid outbox message');
     }
+    if (notifyUserId !== null && (typeof notifyUserId !== 'string' || !/^[UW][A-Z0-9]+$/.test(notifyUserId))) {
+      throw new Error('Invalid outbox notification user');
+    }
+    if (prUrl !== null && (typeof prUrl !== 'string' || prUrl.trim() !== prUrl || !/^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!(?:\.|\.\.)\/)[A-Za-z0-9_.-]{1,100}\/pull\/[1-9][0-9]{0,19}$/.test(prUrl))) {
+      throw new Error('Invalid outbox pull request URL');
+    }
     const id = randomUUID();
     const now = Date.now();
-    this.db.prepare(`INSERT INTO outbox (id, taskId, botKey, channel, threadTs, text, createdAt, nextAttemptAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, taskId, botKey, channel, threadTs, text, now, now);
+    this.db.prepare(`INSERT INTO outbox (id, taskId, botKey, channel, threadTs, text, notifyUserId, prUrl, createdAt, nextAttemptAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, taskId, botKey, channel, threadTs, text, notifyUserId, prUrl, now, now);
     return { ...this.db.prepare('SELECT * FROM outbox WHERE id = ?').get(id) };
   }
 

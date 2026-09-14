@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Enigma Bridge",
+    "name": "Bridge - API Engineer",
     "background_color": "#172235",
-    "description": "Private Slack-to-Codex coding assistant"
+    "description": "API Engineer — API contracts, routes, validation, authentication and authorization."
   },
   "features": {
     "bot_user": {
-      "display_name": "Bridge",
+      "display_name": "Bridge - API Engineer",
       "always_online": false
     }
   },
