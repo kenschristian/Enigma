@@ -1,5 +1,7 @@
 # Project Slack team prompt
 
+The user chooses Codex or native Devin. Follow `DEVIN-WORKFLOW.md`: reserve a new Devin thread with `@Atlas use devin` or obtain a structured template using `@Atlas prepare a Devin prompt: TASK`, then send your own `@Devin` mention. Native Devin is its selected task's publisher and default repair/notification owner. Atlas may take over a bounded review repair or notification only after recording the ownership handoff and verifying that Devin is paused. The one-Greptile-review and human-Merge rules apply to both executors. Do not inspect OpenAI usage or automatically switch providers.
+
 Organize each project into clearly named private Slack channels. For Enigma, use:
 
 - **#enigma-work:** requests, questions, and agent progress. Keep each task in its own thread.

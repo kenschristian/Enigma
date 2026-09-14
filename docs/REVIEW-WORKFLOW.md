@@ -17,6 +17,8 @@ Use the configured user ID for Ken's mention and the configured destination IDs 
 
 ## Preparing the PR
 
+For an explicitly user-selected native Devin task, Devin owns branch publication, the PR and its review/repair handoff, subject to the same one-review and human-Merge rules. This is a scoped exception for that executor; Codex specialists retain their existing restrictions. Host Atlas must not take over Devin work automatically. See `DEVIN-WORKFLOW.md`.
+
 Atlas verifies the repository, remote, branch, working-tree status, and existing PR before publishing. Specialists work in isolated worktrees and return local commits with test evidence; only Atlas pushes and creates or updates the PR. Preserve existing work and use the same PR throughout review and repairs.
 
 For Slack tasks whose sandbox prevents Git commits, Host Atlas also discovers completed edited work through the private task database and prepares it in an isolated integration worktree. It validates the saved project binding, source changes and inactive conversation before publishing. Read-only tasks need no PR; interrupted or ambiguous work stays preserved for explicit resolution. See `REVIEW-MONITOR.md` for the publication checks and recovery ledger. This operating policy does not give Slack workers additional Git permissions.

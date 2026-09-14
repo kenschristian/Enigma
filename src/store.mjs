@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { taskKind, slackThreadKey } from './executors.mjs';
 
 const statuses = new Set(['queued', 'running', 'completed', 'failed', 'interrupted', 'cancelled']);
 const metadata = ['codexThreadId', 'worktreePath', 'branch'];
@@ -10,7 +11,7 @@ const fields = ['eventId', 'conversationKey', 'role', 'prompt', 'channel', 'slac
 const decode = (row) => row ? JSON.parse(row.data) : null;
 const decodeTask = (row) => {
   const task = decode(row);
-  if (task) task.projectIdentity ??= null;
+  if (task) { task.projectIdentity ??= null; task.kind = taskKind(task); }
   return task;
 };
 
@@ -39,6 +40,10 @@ export class TaskStore {
       CREATE INDEX IF NOT EXISTS tasks_conversation ON tasks(conversation_key, sequence);
       CREATE TABLE IF NOT EXISTS conversations (
         conversation_key TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS thread_executors (
+        thread_key TEXT PRIMARY KEY,
         data TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS outbox (
@@ -84,25 +89,69 @@ export class TaskStore {
     }
   }
 
-  enqueue(input) {
+  enqueue(input) { return this.transaction(() => this.#insertTask(input)); }
+
+  // Persist the action, ownership and response together before Slack acknowledges it.
+  enqueueWithReply(input, response) {
+    return this.transaction(() => {
+      const result = this.#insertTask(input);
+      if (result.created) for (const text of response(result.task)) this.addOutbox({
+        taskId: result.task.id, botKey: input.botKey, channel: input.channel, threadTs: input.slackThreadTs, text,
+      });
+      return result;
+    });
+  }
+
+  threadExecutor(input) {
+    const saved = decode(this.db.prepare('SELECT data FROM thread_executors WHERE thread_key = ?').get(slackThreadKey(input)));
+    if (saved) return saved;
+    // Legacy coding history blocks switching, even if completed or cancelled: saved
+    // changes and native session inactivity cannot be established by this listener.
+    const prior = decodeTask(this.db.prepare(`SELECT data FROM tasks WHERE
+      json_extract(data, '$.teamId') = ? AND json_extract(data, '$.channel') = ?
+      AND json_extract(data, '$.slackThreadTs') = ? AND conversation_key NOT LIKE '%:control'
+      AND COALESCE(json_extract(data, '$.kind'), 'coding') = 'coding' ORDER BY sequence LIMIT 1`)
+      .get(input.teamId, input.channel, input.slackThreadTs));
+    return prior ? { executor: 'codex', projectIdentity: prior.projectIdentity, legacy: true } : null;
+  }
+
+  executorConflict(input, executor) {
+    const owner = this.threadExecutor(input);
+    if (!owner) return null;
+    if (owner.executor !== executor) return owner.executor === 'devin' ? 'THREAD_RESERVED_DEVIN' : 'THREAD_RESERVED_CODEX';
+    // Existing Codex project/worktree verification stays in the execution path.
+    if (executor === 'devin' && owner.projectIdentity !== (input.projectIdentity ?? null)) return 'PROJECT_MAPPING_CHANGED';
+    return null;
+  }
+
+  #insertTask(input) {
     for (const field of fields) {
       if (typeof input[field] !== 'string' || !input[field]) throw new Error(`Missing task field: ${field}`);
     }
     if (input.projectIdentity !== undefined && (typeof input.projectIdentity !== 'string' || !input.projectIdentity.trim() || input.projectIdentity.length > 1024)) {
       throw new Error('Invalid task project identity');
     }
-    return this.transaction(() => {
+    const kind = taskKind(input);
+    if (!['coding', 'control', 'devin-selection', 'devin-prompt'].includes(kind)) throw new Error('Invalid task kind');
+    {
       const previous = decodeTask(this.db.prepare('SELECT data FROM tasks WHERE event_id = ?').get(input.eventId));
       if (previous) return { created: false, task: previous };
+      const executor = kind === 'coding' ? 'codex' : kind.startsWith('devin-') ? 'devin' : null;
+      const conflict = executor && this.executorConflict(input, executor);
+      if (executor && !conflict && !this.threadExecutor(input)) {
+        this.db.prepare('INSERT INTO thread_executors (thread_key, data) VALUES (?, ?)').run(slackThreadKey(input), JSON.stringify({
+          executor, projectIdentity: input.projectIdentity ?? null, selectedByUserId: input.userId, sourceEventId: input.eventId, createdAt: Date.now(),
+        }));
+      }
       const conversation = this.conversation(input.conversationKey);
       const now = Date.now();
-      const task = { id: randomUUID(), status: 'queued', createdAt: now, updatedAt: now, result: null, error: null, projectIdentity: input.projectIdentity ?? null };
+      const task = { id: randomUUID(), kind, status: kind === 'coding' ? (conflict ? 'cancelled' : 'queued') : 'completed', createdAt: now, updatedAt: now, result: null, error: conflict || null, projectIdentity: input.projectIdentity ?? null };
       for (const field of fields) task[field] = input[field];
-      for (const field of metadata) task[field] = conversation?.[field] ?? null;
+      for (const field of metadata) task[field] = kind === 'coding' ? conversation?.[field] ?? null : null;
       this.db.prepare('INSERT INTO tasks (id, event_id, conversation_key, status, data) VALUES (?, ?, ?, ?, ?)')
         .run(task.id, task.eventId, task.conversationKey, task.status, JSON.stringify(task));
       return { created: true, task };
-    });
+    }
   }
 
   get(id) {
@@ -148,6 +197,11 @@ export class TaskStore {
     return this.transaction(() => {
       const task = this.get(id);
       if (!task) throw new Error('Task not found');
+      if (['queued', 'running'].includes(patch.status)) {
+        if (task.kind !== 'coding') throw new Error('Only coding tasks can run');
+        const conflict = this.executorConflict(task, 'codex');
+        if (conflict) throw Object.assign(new Error('Thread executor prevents coding.'), { code: conflict });
+      }
       if (patch.status === 'running' && this.db.prepare(
         "SELECT 1 FROM tasks WHERE conversation_key = ? AND status = 'running' AND id != ?"
       ).get(task.conversationKey, id)) throw new Error('Conversation already running');

@@ -95,6 +95,48 @@ test('host prompt has explicit acknowledgement, human Merge and no idle heartbea
   const message=hostWakeMessage({id:randomUUID()},path.join(os.tmpdir(),'config.json'));
   assert.match(message,/inspect --config/);assert.match(message,/ack instead/);assert.match(message,/Keep the desktop heartbeat paused/);assert.match(message,/Never merge/);
 });
+
+test('Devin preparation and selection never create host wake events, even without control suffix',async()=>{
+  const f=fixture();f.add({kind:'devin-prompt'});f.add({kind:'devin-selection'});
+  await f.controller.tick();assert.equal(f.calls.length,0);assert.equal(f.journal.pending().length,0);await f.close();
+});
+
+test('discovered task wake is invalidated by noncoding kind or Devin thread ownership',async()=>{
+  for(const change of ['kind','owner']) {
+    const f=fixture();const task=f.add();f.controller.discoverTasks();
+    if(change==='kind') {
+      task.kind='devin-prompt';f.store.db.prepare('UPDATE tasks SET data=? WHERE id=?').run(JSON.stringify(task),task.id);
+    } else {
+      f.store.db.prepare('UPDATE thread_executors SET data=?').run(JSON.stringify({executor:'devin',projectIdentity:task.projectIdentity}));
+    }
+    await f.controller.dispatch();assert.equal(f.calls.length,0);assert.equal(f.notices.length,0);await f.close();
+  }
+});
+
+test('Devin review ledger entries never observe GitHub or wake Codex',async()=>{
+  let reads=0;const f=fixture({readLedger:async()=>({entries:[{repository:'owner/Enigma',pullRequest:5,executor:'devin'}]}),
+    observe:async()=>{reads++;throw new Error('Must not observe');}});
+  await f.controller.tick();assert.equal(reads,0);assert.equal(f.calls.length,0);await f.close();
+});
+
+test('pending GitHub wake revalidates an executor changed to Devin before dispatch',async()=>{
+  const entry={repository:'owner/Enigma',pullRequest:5};
+  const f=fixture({readLedger:async()=>({entries:[entry]}),
+    observe:async()=>({repository:'owner/Enigma',pullRequest:5,actionKey:'a'.repeat(64)})});
+  await f.controller.discoverReviews();assert.equal(f.journal.pending().length,1);
+  entry.executor='devin';await f.controller.dispatch();
+  assert.equal(f.calls.length,0);assert.equal(f.notices.length,0);await f.close();
+});
+
+test('unavailable review ownership leaves its wake pending while an independent task still dispatches',async()=>{
+  const f=fixture({readLedger:async()=>({entries:[{repository:'owner/Enigma',pullRequest:5}]}),
+    observe:async()=>({repository:'owner/Enigma',pullRequest:5,actionKey:'a'.repeat(64)})});
+  await f.controller.discoverReviews();f.add();f.controller.discoverTasks();
+  f.controller.readLedger=async()=>{throw new Error('temporarily unavailable');};
+  await f.controller.dispatch();
+  assert.equal(f.calls.length,1);assert.equal(f.journal.get(f.calls[0].eventId).payload.kind,'task-completed');
+  assert.equal(f.journal.pending().length,1);await f.close();
+});
 test('enabled configuration requires an explicit host, activation fence, projects and channels',()=>{
   const valid=value=>validateConfig(value,{env:{},requireTokens:false});assert.equal(valid(config()).eventWake.enabled,true);
   for(const patch of [{threadId:'unknown'},{taskSequenceFloor:-1},{githubPollSeconds:1}])assert.throws(()=>valid({...config(),eventWake:{...config().eventWake,...patch}}));

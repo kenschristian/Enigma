@@ -7,6 +7,7 @@ import { projectIdentity } from './projects.mjs';
 import { ROLES, loadConfig } from './config.mjs';
 import { enqueueHostWake } from './host-wake.mjs';
 import { observePullRequest } from './github-events.mjs';
+import { taskKind } from './executors.mjs';
 
 const sourceRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const signature = config => createHash('sha256').update(JSON.stringify({ team:config.allowedTeamId,users:config.allowedUserIds,
@@ -15,7 +16,7 @@ const signature = config => createHash('sha256').update(JSON.stringify({ team:co
 export function authorizedTask(task, config) {
   const bot = config.bots.find(value => value.key === task.botKey);
   const project = config.projects.find(value => value.channels.work === task.channel);
-  return !!project && task.status === 'completed' && !task.conversationKey.endsWith(':control') &&
+  return !!project && task.status === 'completed' && taskKind(task) === 'coding' && !task.conversationKey.endsWith(':control') &&
     task.teamId === config.allowedTeamId && config.allowedUserIds.includes(task.userId) &&
     bot && Object.hasOwn(ROLES,task.role) && (bot.role === 'atlas' || bot.role === task.role) &&
     task.projectIdentity === projectIdentity(config,task.channel);
@@ -62,7 +63,7 @@ export class EventWakeController {
         AND unresolved.status IN ('queued','running','interrupted','failed')) ORDER BY t.sequence`).all(this.config.eventWake.taskSequenceFloor);
     for(const row of rows) {
       const task=JSON.parse(row.data);
-      if(!authorizedTask(task,this.config)) continue;
+      if(!authorizedTask(task,this.config) || this.store.executorConflict(task,'codex')) continue;
       this.journal.add(`task:${task.id}:${task.updatedAt}`,{kind:'task-completed',taskId:task.id,updatedAt:task.updatedAt,
         projectIdentity:task.projectIdentity,channel:task.channel,userId:task.userId,botKey:task.botKey});
     }
@@ -73,7 +74,7 @@ export class EventWakeController {
     const ledger=await this.readLedger();
     const seen=new Set();
     for(const entry of ledger.entries) {
-      if(entry.confirmedMerge || entry.closedUnmerged) continue;
+      if(entry.confirmedMerge || entry.closedUnmerged || (entry.executor ?? 'codex') !== 'codex') continue;
       const project=this.config.projects.find(p=>p.repositoryFullName.toLowerCase()===String(entry.repository).toLowerCase());
       if(!project || !Number.isSafeInteger(entry.pullRequest) || entry.pullRequest<1) continue;
       const key=`${project.repositoryFullName.toLowerCase()}:${entry.pullRequest}`;
@@ -96,7 +97,7 @@ export class EventWakeController {
     const p=event.payload;
     if(p.kind==='task-completed') {
       const task=this.store.get(p.taskId);
-      return task && authorizedTask(task,this.config) && task.updatedAt===p.updatedAt && task.projectIdentity===p.projectIdentity &&
+      return task && authorizedTask(task,this.config) && !this.store.executorConflict(task,'codex') && task.updatedAt===p.updatedAt && task.projectIdentity===p.projectIdentity &&
         !this.store.db.prepare(`SELECT 1 FROM tasks other JOIN tasks original ON original.id=?
           WHERE other.conversation_key=original.conversation_key AND (other.sequence>original.sequence OR
             other.status IN ('queued','running','interrupted','failed')) LIMIT 1`).get(task.id);
@@ -104,9 +105,22 @@ export class EventWakeController {
     return ['github-change','github-unavailable'].includes(p.kind) && this.config.projects.some(project=>
       project.repositoryFullName===p.repository && project.channels.codeReview===p.channel) && Number.isSafeInteger(p.pullRequest) && p.pullRequest>0;
   }
+  async reviewEventAllowed(event) {
+    if(event.payload.kind === 'task-completed') return true;
+    // Recheck durable ownership even for a GitHub event queued before a restart.
+    // Existing ledger entries without executor retain their Codex ownership.
+    const ledger=await this.readLedger(), p=event.payload;
+    const entries=ledger.entries.filter(entry => String(entry.repository).toLowerCase()===p.repository.toLowerCase() && entry.pullRequest===p.pullRequest);
+    return entries.length>0 && entries.every(entry => (entry.executor ?? 'codex') === 'codex' && !entry.confirmedMerge && !entry.closedUnmerged);
+  }
   async dispatch() {
     for(const event of this.journal.pending()) {
       if(this.stopping) break;
+      if(!await this.currentConfig()) return;
+      if(!this.validEvent(event)) { this.journal.blocked(event.id,'EVENT_NO_LONGER_AUTHORIZED'); continue; }
+      let reviewAllowed;
+      try { reviewAllowed=await this.reviewEventAllowed(event); } catch { continue; }
+      if(!reviewAllowed) { this.journal.blocked(event.id,'EVENT_NO_LONGER_AUTHORIZED'); continue; }
       if(!await this.currentConfig()) return;
       if(!this.validEvent(event)) { this.journal.blocked(event.id,'EVENT_NO_LONGER_AUTHORIZED'); continue; }
       const first=this.journal.attempt(event.id); // committed before transport; crash must reconcile, never blindly re-add
@@ -119,7 +133,9 @@ export class EventWakeController {
     for(const event of this.journal.needsNotice()) {
       if(!await this.currentConfig()) return;
       // Send through the existing authorized outbox; do not expose prompts, review bodies or transport errors.
-      if(this.validEvent(event)) this.notice(event,`Atlas handoff needs attention. Event ${event.id} is saved, but automatic delivery could not be confirmed. Open the Enigma Codex task to inspect it. No repeated AI retry was started.`);
+      let reviewAllowed;
+      try { reviewAllowed=await this.reviewEventAllowed(event); } catch { continue; }
+      if(this.validEvent(event) && reviewAllowed && await this.currentConfig() && this.validEvent(event)) this.notice(event,`Atlas handoff needs attention. Event ${event.id} is saved, but automatic delivery could not be confirmed. Open the Enigma Codex task to inspect it. No repeated AI retry was started.`);
       this.journal.noticed(event.id);
     }
   }
