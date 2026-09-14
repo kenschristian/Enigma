@@ -294,6 +294,38 @@ export class CodexClient {
             const error = profileError(); this.fail(error); throw error;
           }
         }
+        if (threadId) {
+          // Archive membership is explicit protocol evidence. Never infer it from
+          // a generic RPC rejection or bypass resume with a rollout path/history.
+          const seen = new Set();
+          let cursor;
+          do {
+            const page = await this.request('thread/list', {
+              archived: true, cwd, modelProviders: ['openai'], limit: 100,
+              // An empty source filter defaults to cli/vscode and misses app-server threads.
+              sourceKinds: ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
+                'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown'],
+              ...(cursor ? { cursor } : {}),
+            });
+            check();
+            if (!object(page) || !Array.isArray(page.data) ||
+                page.data.some(thread => !object(thread) || typeof thread.id !== 'string')) throw protocolError();
+            cursor = page.nextCursor;
+            if (cursor != null && (typeof cursor !== 'string' || !cursor || seen.has(cursor))) throw protocolError();
+            const archived = page.data.find(thread => thread.id === threadId);
+            if (archived) {
+              if (archived.cwd !== cwd || archived.modelProvider !== 'openai') throw protocolError();
+              const restored = await this.request('thread/unarchive', { threadId });
+              check();
+              if (restored?.thread?.id !== threadId) throw protocolError();
+              break;
+            }
+            if (cursor) {
+              seen.add(cursor);
+              if (seen.size >= 100) throw protocolError();
+            }
+          } while (cursor);
+        }
         const params = {
           ...(threadId ? { threadId, excludeTurns: true } : {}), cwd, model, modelProvider: 'openai',
           approvalPolicy: 'on-request', approvalsReviewer: 'user',
@@ -303,7 +335,8 @@ export class CodexClient {
         };
         const result = await this.request(threadId ? 'thread/resume' : 'thread/start', params);
         check();
-        if (typeof result?.thread?.id !== 'string' || result.model !== model || result.modelProvider !== 'openai') throw protocolError();
+        if (typeof result?.thread?.id !== 'string' || (threadId && result.thread.id !== threadId) ||
+            result.model !== model || result.modelProvider !== 'openai') throw protocolError();
         if (this.workspace && (result.activePermissionProfile?.id !== PROFILE_ID || result.activePermissionProfile.extends !== null ||
             !Array.isArray(result.runtimeWorkspaceRoots) || result.runtimeWorkspaceRoots.length !== 1 ||
             pathIdentity(result.runtimeWorkspaceRoots[0]) !== pathIdentity(this.workspace.path))) {

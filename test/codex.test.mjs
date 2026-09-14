@@ -33,6 +33,7 @@ function harness(handler = () => false, clientOptions = {}) {
         if (message.method === 'initialize') respond(message, { userAgent: 'codex' });
         if (message.method === 'account/read') respond(message, { account: { type: 'chatgpt', email: 'private@example.com', planType: 'pro', token: 'secret' }, requiresOpenaiAuth: true });
         if (message.method === 'model/list') respond(message, { data: [model], nextCursor: null });
+        if (message.method === 'thread/list') respond(message, { data: [], nextCursor: null });
         if (message.method === 'config/read') respond(message, { config: { permissions: {
           enigma_workspace: { ...client.workspace.profile, extends: null, workspace_roots: null, description: null },
         } } });
@@ -311,6 +312,140 @@ test('resume reapplies explicit settings and isolates successive runs', async t 
   for (let n = 1; n <= 2; n++) assert.equal((await h.client.run({ ...options, threadId: 'saved-thread' })).text, `Done ${n}`);
   assert.equal(h.sent.filter(x => x.method === 'thread/resume').length, 2);
   assert.equal(h.sent.some(x => x.method === 'thread/start'), false);
+  assert.equal(h.sent.some(x => x.method === 'thread/unarchive'), false);
+});
+
+test('archived follow-up restores only the saved thread then resumes with unchanged settings', async t => {
+  const h = harness((message, { respond, notify }) => {
+    if (message.method === 'thread/list') {
+      assert.equal(message.params.archived, true);
+      assert.equal(message.params.cwd, cwd);
+      assert.deepEqual(message.params.modelProviders, ['openai']);
+      assert.ok(message.params.sourceKinds.includes('appServer'));
+      respond(message, message.params.cursor ? {
+        data: [{ id: 'saved-thread', cwd, modelProvider: 'openai' }], nextCursor: null,
+      } : { data: [{ id: 'unrelated-thread', cwd, modelProvider: 'openai' }], nextCursor: 'page-2' });
+      return true;
+    }
+    if (message.method === 'thread/unarchive') {
+      assert.deepEqual(message.params, { threadId: 'saved-thread' });
+      respond(message, { thread: { id: 'saved-thread' } }); return true;
+    }
+    if (message.method === 'turn/start') {
+      respond(message, { turn: { id: 'turn-1', status: 'inProgress' } });
+      finish(notify, { threadId: 'saved-thread' }); return true;
+    }
+    return false;
+  }); t.after(() => h.client.close());
+  const result = await h.client.run({ ...options, threadId: 'saved-thread' });
+  assert.equal(result.threadId, 'saved-thread');
+  assert.equal(result.text, 'Done.');
+  assert.deepEqual(h.sent.filter(x => /^thread\//.test(x.method)).map(x => x.method),
+    ['thread/list', 'thread/list', 'thread/unarchive', 'thread/resume']);
+  const resumed = h.sent.find(x => x.method === 'thread/resume').params;
+  assert.equal(resumed.model, options.model);
+  assert.equal(resumed.config.model_reasoning_effort, options.effort);
+  assert.equal(resumed.approvalPolicy, 'on-request');
+  assert.equal(resumed.approvalsReviewer, 'user');
+  assert.equal(resumed.sandbox, 'workspace-write');
+  assert.equal(resumed.config['sandbox_workspace_write.network_access'], false);
+  assert.equal(resumed.path, undefined);
+  assert.equal(resumed.history, undefined);
+});
+
+test('unrelated archived threads do not trigger restoration or hide resume errors', async t => {
+  const h = harness((message, { respond, emit }) => {
+    if (message.method === 'thread/list') {
+      respond(message, { data: [{ id: 'another-thread', cwd, modelProvider: 'openai' }], nextCursor: null }); return true;
+    }
+    if (message.method === 'thread/resume') {
+      emit({ id: message.id, error: { code: -32600, message: 'private authentication failure' } }); return true;
+    }
+    return false;
+  }); t.after(() => h.client.close());
+  await assert.rejects(h.client.run({ ...options, threadId: 'saved-thread' }), error =>
+    error.code === 'CODEX_RPC' && !error.message.includes('private'));
+  assert.equal(h.sent.filter(x => x.method === 'thread/resume').length, 1);
+  assert.equal(h.sent.some(x => ['thread/unarchive', 'thread/start', 'turn/start'].includes(x.method)), false);
+});
+
+test('archive lookup rejects malformed pages, pagination loops, and mismatched scope', async t => {
+  for (const page of [null, { data: null }, { data: [null] }, { data: [{}] },
+    { data: [], nextCursor: 7 }, { data: [], nextCursor: '' }, { data: [], nextCursor: 'loop' },
+    { data: [{ id: 'saved-thread', cwd: join(cwd, 'elsewhere'), modelProvider: 'openai' }] },
+    { data: [{ id: 'saved-thread', cwd, modelProvider: 'other' }] }]) {
+    const h = harness((message, { respond }) => {
+      if (message.method !== 'thread/list') return false;
+      respond(message, page); return true;
+    }); t.after(() => h.client.close());
+    await assert.rejects(h.client.run({ ...options, threadId: 'saved-thread' }), { code: 'CODEX_PROTOCOL' });
+    assert.ok(h.sent.filter(x => x.method === 'thread/list').length <= 2);
+    assert.equal(h.sent.some(x => ['thread/unarchive', 'thread/resume', 'thread/start', 'turn/start'].includes(x.method)), false);
+  }
+});
+
+test('archive lookup and restoration errors fail closed without retries or raw error exposure', async t => {
+  for (const failedMethod of ['thread/list', 'thread/unarchive', 'thread/resume']) {
+    const h = harness((message, { emit, respond }) => {
+      if (message.method === failedMethod) {
+        emit({ id: message.id, error: { code: 42, message: 'private secret', data: { token: 'secret' } } }); return true;
+      }
+      if (message.method === 'thread/list') {
+        respond(message, { data: [{ id: 'saved-thread', cwd, modelProvider: 'openai' }], nextCursor: null }); return true;
+      }
+      if (message.method === 'thread/unarchive') {
+        respond(message, { thread: { id: 'saved-thread' } }); return true;
+      }
+      return false;
+    }); t.after(() => h.client.close());
+    await assert.rejects(h.client.run({ ...options, threadId: 'saved-thread' }), error =>
+      error.code === 'CODEX_RPC' && !JSON.stringify(error).includes('secret') && !error.message.includes('private'));
+    assert.equal(h.sent.filter(x => x.method === failedMethod).length, 1);
+    assert.equal(h.sent.some(x => ['thread/start', 'turn/start'].includes(x.method)), false);
+  }
+});
+
+test('archive restoration and resume must retain the saved thread identity', async t => {
+  for (const wrongMethod of ['thread/unarchive', 'thread/resume']) {
+    const h = harness((message, { respond }) => {
+      if (message.method === 'thread/list') {
+        respond(message, { data: [{ id: 'saved-thread', cwd, modelProvider: 'openai' }], nextCursor: null }); return true;
+      }
+      if (message.method === 'thread/unarchive' || message.method === wrongMethod) {
+        respond(message, { thread: { id: message.method === wrongMethod ? 'wrong-thread' : 'saved-thread' },
+          model: options.model, modelProvider: 'openai' }); return true;
+      }
+      return false;
+    }); t.after(() => h.client.close());
+    await assert.rejects(h.client.run({ ...options, threadId: 'saved-thread' }), { code: 'CODEX_PROTOCOL' });
+    assert.equal(h.sent.some(x => ['thread/start', 'turn/start'].includes(x.method)), false);
+  }
+});
+
+test('auth, model and permission failures prevent archive lookup or restoration', async t => {
+  for (const failure of ['auth', 'model', ...(process.platform === 'win32' ? ['profile'] : [])]) {
+    const h = harness((message, { respond }) => {
+      if (failure === 'auth' && message.method === 'account/read') { respond(message, { account: null }); return true; }
+      if (failure === 'model' && message.method === 'model/list') { respond(message, { data: [], nextCursor: null }); return true; }
+      if (failure === 'profile' && message.method === 'config/read') { respond(message, { config: {} }); return true; }
+      return false;
+    }, failure === 'profile' ? { workspace: { path: cwd, gitCommonDir: join(cwd, 'repo', '.git') } } : {});
+    t.after(() => h.client.close());
+    await assert.rejects(h.client.run({ ...options, threadId: 'saved-thread' }),
+      { code: { auth: 'CODEX_AUTH', model: 'CODEX_MODEL', profile: 'CODEX_PROFILE' }[failure] });
+    assert.equal(h.sent.some(x => /^thread\//.test(x.method)), false);
+  }
+});
+
+test('cancellation during archive lookup prevents restoration and turns', async t => {
+  const controller = new AbortController();
+  const h = harness((message, { respond }) => {
+    if (message.method !== 'thread/list') return false;
+    controller.abort();
+    respond(message, { data: [{ id: 'saved-thread', cwd, modelProvider: 'openai' }], nextCursor: null }); return true;
+  }); t.after(() => h.client.close());
+  await assert.rejects(h.client.run({ ...options, threadId: 'saved-thread', signal: controller.signal }), { code: 'CODEX_CANCELLED' });
+  assert.equal(h.sent.some(x => ['thread/unarchive', 'thread/resume', 'thread/start', 'turn/start'].includes(x.method)), false);
 });
 
 test('UTF-8 and CRLF frames survive chunk boundaries', async t => {
