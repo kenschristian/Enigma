@@ -2,10 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-import { join } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { CodexClient, codexEnvironment } from '../src/codex.mjs';
 
 const cwd = process.cwd();
+const nodeExecutable = realpathSync.native(process.execPath);
+const nodeDirectory = dirname(nodeExecutable);
 const options = { cwd, model: 'gpt-6-astra', effort: 'ultra', prompt: 'Build it.' };
 const model = { id: 'gpt-6-astra', model: 'gpt-6-astra', supportedReasoningEfforts: [{ reasoningEffort: 'ultra' }, { reasoningEffort: 'high' }] };
 
@@ -76,7 +79,19 @@ test('Windows workspace profile applies exact read/write grants on start, resume
     assert.deepEqual(params.config['permissions.enigma_workspace'], { filesystem: {
       ':minimal': 'read', [cwd]: 'write', [join(cwd, 'fixture-repo', '.git')]: 'read',
       [join(cwd, '.git')]: 'read', [join(cwd, '.codex')]: 'read', [join(cwd, '.agents')]: 'read',
+      [nodeExecutable]: 'read',
     }, network: { enabled: false } });
+    assert.equal(params.config['permissions.enigma_workspace'].filesystem[nodeDirectory], undefined);
+    const literalCommand = params.developerInstructions.split('```cmd\n')[1].split('\n```')[0];
+    assert.ok(literalCommand.startsWith('call '));
+    assert.ok(literalCommand.includes(nodeExecutable));
+    assert.ok(literalCommand.endsWith(' --test'));
+    assert.equal(literalCommand.includes('--preserve-symlinks'), false);
+    assert.ok(params.developerInstructions.includes('NODE_OPTIONS to --preserve-symlinks --preserve-symlinks-main'));
+    if (/^[A-Za-z]:\\[A-Za-z0-9_.\\-]+$/.test(nodeExecutable)) assert.equal(literalCommand.includes('"'), false);
+    assert.ok(params.developerInstructions.includes('do not request approval or escalation'));
+    assert.ok(params.developerInstructions.includes('Atlas for host validation'));
+    assert.equal(params.developerInstructions.includes('--test-isolation=none'), false);
   }
   assert.equal(starts[1].params.excludeTurns, true);
   for (const { params } of h.sent.filter(message => message.method === 'turn/start')) {
@@ -136,6 +151,9 @@ test('effective Windows profile rejects inherited roots and network access befor
     profile => { profile.extends = 'workspace'; },
     profile => { profile.workspace_roots = ['C:\\']; },
     profile => { profile.filesystem[join(cwd, 'repo', '.git')] = 'write'; },
+    profile => { delete profile.filesystem[nodeExecutable]; },
+    profile => { profile.filesystem[nodeExecutable] = 'write'; },
+    profile => { profile.filesystem[nodeDirectory] = 'read'; },
   ]) {
     const h = harness((message, { respond }) => {
       if (message.method !== 'config/read') return false;
@@ -149,15 +167,65 @@ test('effective Windows profile rejects inherited roots and network access befor
 });
 
 test('Windows child environment normalizes PATH, deduplicates names and strips credentials', () => {
-  const source = { Path: 'legacy-path', PATH: 'selected-path', TEMP: 'selected-temp', temp: 'duplicate-temp', SystemRoot: 'C:\\Windows', enigma_slack_token: 'private', OpenAI_Api_Key: 'private', CODEX_API_KEY: 'private' };
+  const source = { Path: 'legacy-path', PATH: 'selected-path', TEMP: 'selected-temp', temp: 'duplicate-temp', SystemRoot: 'C:\\Windows', enigma_slack_token: 'private', OpenAI_Api_Key: 'private', OPENAI_ADMIN_KEY: 'private', CODEX_API_KEY: 'private' };
   const normalized = codexEnvironment(source, 'win32');
-  assert.deepEqual(normalized, { PATH: 'selected-path', SystemRoot: 'C:\\Windows', TEMP: 'selected-temp' });
+  assert.deepEqual(normalized, { PATH: `selected-path;${nodeDirectory}`, SystemRoot: 'C:\\Windows', TEMP: 'selected-temp' });
   assert.equal(source.Path, 'legacy-path', 'the parent environment must remain unchanged');
-  assert.deepEqual(codexEnvironment({ Path: 'existing-search-path' }, 'win32'), { PATH: 'existing-search-path' });
+  assert.deepEqual(codexEnvironment({ Path: 'existing-search-path' }, 'win32'), { PATH: `existing-search-path;${nodeDirectory}` });
+  assert.deepEqual(codexEnvironment({}, 'win32'), { PATH: nodeDirectory });
+  const existing = `system;"${nodeDirectory.toUpperCase()}";tools`;
+  assert.equal(codexEnvironment({ Path: existing }, 'win32').PATH, existing);
+  for (const value of [null, 123, 'prefix\0bad', 'prefix\nbad']) assert.throws(() => codexEnvironment({ PATH: value }, 'win32'), TypeError);
+});
+
+test('Windows runtime grants derive only from the validated running executable', { skip: process.platform !== 'win32' }, t => {
+  const workspace = { path: cwd, gitCommonDir: join(cwd, 'repo', '.git'), nodeExecutable: 'C:\\private\\arbitrary.exe' };
+  const h = harness(undefined, { workspace, nodeExecutable: 'C:\\private\\arbitrary.exe' });
+  assert.equal(h.client.workspace.nodeExecutable, nodeExecutable);
+  assert.equal(h.client.workspace.profile.filesystem['C:\\private\\arbitrary.exe'], undefined);
+  for (const value of [cwd, 'relative.exe', join(cwd, 'missing-trusted-node.exe'), `${cwd}\nnode.exe`, `${cwd};private.exe`, `${cwd}\\%PATH%.exe`]) {
+    const original = realpathSync.native;
+    const mock = t.mock.method(realpathSync, 'native', () => value);
+    try {
+      assert.throws(() => harness(undefined, { workspace }), { code: 'CODEX_NODE_RUNTIME' });
+      assert.throws(() => codexEnvironment({}, 'win32'), { code: 'CODEX_NODE_RUNTIME' });
+    } finally { mock.mock.restore(); }
+    assert.equal(realpathSync.native, original);
+  }
+});
+
+test('a changed trusted executable fails before app-server spawn', { skip: process.platform !== 'win32' }, async t => {
+  const h = harness(undefined, { workspace: { path: cwd, gitCommonDir: join(cwd, 'repo', '.git') } });
+  t.mock.method(realpathSync, 'native', () => join(cwd, 'src', 'codex.mjs'));
+  await assert.rejects(h.client.start(), { code: 'CODEX_NODE_RUNTIME' });
+  assert.equal(h.spawnOptions, undefined);
+  assert.equal(h.sent.length, 0);
 });
 
 test('non-Windows child environment preserves case-sensitive names', () => {
   assert.deepEqual(codexEnvironment({ PATH: 'upper', Path: 'mixed', ENIGMA_TOKEN: 'private' }, 'linux'), { PATH: 'upper', Path: 'mixed' });
+});
+
+test('Windows workspace children replace inherited Node preload options without changing parent or doctor', { skip: process.platform !== 'win32' }, async t => {
+  const inherited = '--require C:\\private\\untrusted-preload.cjs --inspect=0';
+  const prior = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = inherited;
+  t.after(() => {
+    if (prior === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = prior;
+  });
+  const scoped = harness(undefined, { workspace: { path: cwd, gitCommonDir: join(cwd, 'repo', '.git') } });
+  const unscoped = harness();
+  t.after(() => scoped.client.close());
+  t.after(() => unscoped.client.close());
+  await scoped.client.start();
+  await unscoped.client.start();
+  assert.equal(scoped.spawnOptions.env.NODE_OPTIONS, '--preserve-symlinks --preserve-symlinks-main');
+  assert.deepEqual(Object.keys(scoped.spawnOptions.env).filter(key => key.toUpperCase() === 'NODE_OPTIONS'), ['NODE_OPTIONS']);
+  assert.equal(unscoped.spawnOptions.env.NODE_OPTIONS, inherited);
+  assert.equal(process.env.NODE_OPTIONS, inherited);
+  assert.equal(scoped.client.workspace.profile.network.enabled, false);
+  assert.equal(scoped.client.workspace.profile.filesystem[nodeDirectory], undefined);
 });
 
 test('handshake runs once, disables shell, forces subscription auth and strips secrets', async t => {

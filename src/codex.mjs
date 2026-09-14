@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { isAbsolute, join, normalize, parse } from 'node:path';
+import { realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, normalize, parse } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -23,6 +24,17 @@ const toml = value => typeof value === 'string' ? JSON.stringify(value) : typeof
 const withoutNullDefaults = value => object(value) ? Object.fromEntries(Object.entries(value)
   .filter(([, item]) => item !== null).map(([key, item]) => [key, withoutNullDefaults(item)])) : value;
 
+function trustedNodeExecutable() {
+  try {
+    // This is the running bridge's executable, never a task/config-supplied path.
+    const executable = realpathSync.native(process.execPath);
+    if (!isAbsolute(executable) || /[\x00-\x1f";%!]/.test(executable) || !statSync(executable).isFile()) throw new Error();
+    return executable;
+  } catch {
+    throw safeError('CODEX_NODE_RUNTIME', 'The trusted Node executable could not be validated. No runtime access was added.');
+  }
+}
+
 function workspaceProfile(workspace) {
   if (!object(workspace) || ![workspace.path, workspace.gitCommonDir].every(value =>
     typeof value === 'string' && isAbsolute(value) && !/[\x00-\x1f]/.test(value) && normalize(value) !== parse(value).root)) {
@@ -30,15 +42,16 @@ function workspaceProfile(workspace) {
   }
   const path = normalize(workspace.path);
   const gitCommonDir = normalize(workspace.gitCommonDir);
+  const nodeExecutable = trustedNodeExecutable();
   const profile = { filesystem: { ':minimal': 'read', [path]: 'write', [gitCommonDir]: 'read',
-    [join(path, '.git')]: 'read', [join(path, '.codex')]: 'read', [join(path, '.agents')]: 'read' },
+    [join(path, '.git')]: 'read', [join(path, '.codex')]: 'read', [join(path, '.agents')]: 'read', [nodeExecutable]: 'read' },
     network: { enabled: false } };
-  return { path, profile };
+  return { path, profile, nodeExecutable };
 }
 
 export function codexEnvironment(source = process.env, platform = process.platform) {
   const entries = Object.entries(source).filter(([key]) =>
-    !/^(OPENAI_API_KEY$|CODEX_API_KEY$|ENIGMA_)/i.test(key));
+    !/^(OPENAI_API_KEY$|OPENAI_ADMIN_KEY$|CODEX_API_KEY$|ENIGMA_)/i.test(key));
   if (platform !== 'win32') return Object.fromEntries(entries);
   const normalized = new Map();
   // Windows keys are case-insensitive. Match Node's deterministic first-key
@@ -48,7 +61,16 @@ export function codexEnvironment(source = process.env, platform = process.platfo
     const identity = key.toUpperCase();
     if (!normalized.has(identity)) normalized.set(identity, [identity === 'PATH' ? 'PATH' : key, value]);
   }
-  return Object.fromEntries(normalized.values());
+  const environment = Object.fromEntries(normalized.values());
+  const runtimeDirectory = dirname(trustedNodeExecutable());
+  if (environment.PATH !== undefined && (typeof environment.PATH !== 'string' || /[\x00\r\n]/.test(environment.PATH))) {
+    throw new TypeError('Invalid Windows child PATH.');
+  }
+  const searchPath = environment.PATH ?? '';
+  if (!searchPath.split(';').some(entry => pathIdentity(entry.replace(/^"|"$/g, '')) === pathIdentity(runtimeDirectory))) {
+    environment.PATH = searchPath ? `${searchPath};${runtimeDirectory}` : runtimeDirectory;
+  }
+  return environment;
 }
 
 /** One stdio app-server connection, with at most one active run. Never logs RPC data. */
@@ -81,11 +103,21 @@ export class CodexClient {
 
   async initialize() {
     try {
+      if (this.workspace && trustedNodeExecutable() !== this.workspace.nodeExecutable) {
+        throw safeError('CODEX_NODE_RUNTIME', 'The trusted Node executable changed before startup. No work was started.');
+      }
+      const environment = codexEnvironment();
+      if (this.workspace) {
+        // Plain Node commands must inherit the proven loader behavior. Replace
+        // inherited preload/options entirely; never mutate the bridge environment.
+        for (const key of Object.keys(environment)) if (key.toUpperCase() === 'NODE_OPTIONS') delete environment[key];
+        environment.NODE_OPTIONS = '--preserve-symlinks --preserve-symlinks-main';
+      }
       const overrides = Object.entries(this.policyConfig).flatMap(([key, value]) => ['-c', `${key}=${toml(value)}`]);
       this.child = this.spawnFn(this.command, [...this.args, 'app-server', '--listen', 'stdio://', ...overrides], {
         cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true,
         // Auth comes only from the existing Codex ChatGPT login. Do not inherit API credentials.
-        env: codexEnvironment(),
+        env: environment,
       });
       this.childExit = new Promise(resolve => {
         this.child.once('exit', () => { resolve(); this.fail(safeError('CODEX_EXIT', 'Codex app-server exited before the operation finished.')); });
@@ -266,7 +298,7 @@ export class CodexClient {
           ...(threadId ? { threadId, excludeTurns: true } : {}), cwd, model, modelProvider: 'openai',
           approvalPolicy: 'on-request', approvalsReviewer: 'user',
           ...(this.workspace ? { permissions: PROFILE_ID, runtimeWorkspaceRoots: [this.workspace.path] } : { sandbox: 'workspace-write' }),
-          developerInstructions: instructions,
+          developerInstructions: this.workspace ? `${instructions}\n\nFor Node checks use the trusted executable with shell C:\\Windows\\System32\\cmd.exe, login:false and the supplied absolute workdir. The workspace child environment already sets NODE_OPTIONS to --preserve-symlinks --preserve-symlinks-main to avoid Node loader realpath traversal through private package ancestors. Keep that environment intact; plain Node commands inherit both flags. Copy this cmd command literally; do not add quotes or backslash escapes:\n\`\`\`cmd\ncall ${/^[A-Za-z]:\\[A-Za-z0-9_.\\-]+$/.test(this.workspace.nodeExecutable) ? this.workspace.nodeExecutable : `"${this.workspace.nodeExecutable}"`} --test\n\`\`\`\nAn explicit test-file path may follow --test. Keep normal test-process isolation. Only the executable file has extra read access. If any test or quoted-path invocation remains blocked, do not request approval or escalation, retry outside the sandbox, or read private parent folders. Report the command and failure to Atlas for host validation, preserve all work, and leave the task recoverable.` : instructions,
           config: { ...config, ...this.policyConfig, model, model_reasoning_effort: effort },
         };
         const result = await this.request(threadId ? 'thread/resume' : 'thread/start', params);
