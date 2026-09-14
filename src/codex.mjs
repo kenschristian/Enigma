@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { isAbsolute, join, normalize, parse } from 'node:path';
+import { realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, normalize, parse } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -23,6 +24,17 @@ const toml = value => typeof value === 'string' ? JSON.stringify(value) : typeof
 const withoutNullDefaults = value => object(value) ? Object.fromEntries(Object.entries(value)
   .filter(([, item]) => item !== null).map(([key, item]) => [key, withoutNullDefaults(item)])) : value;
 
+function trustedNodeExecutable() {
+  try {
+    // This is the running bridge's executable, never a task/config-supplied path.
+    const executable = realpathSync.native(process.execPath);
+    if (!isAbsolute(executable) || /[\x00-\x1f";%!]/.test(executable) || !statSync(executable).isFile()) throw new Error();
+    return executable;
+  } catch {
+    throw safeError('CODEX_NODE_RUNTIME', 'The trusted Node executable could not be validated. No runtime access was added.');
+  }
+}
+
 function workspaceProfile(workspace) {
   if (!object(workspace) || ![workspace.path, workspace.gitCommonDir].every(value =>
     typeof value === 'string' && isAbsolute(value) && !/[\x00-\x1f]/.test(value) && normalize(value) !== parse(value).root)) {
@@ -30,15 +42,16 @@ function workspaceProfile(workspace) {
   }
   const path = normalize(workspace.path);
   const gitCommonDir = normalize(workspace.gitCommonDir);
+  const nodeExecutable = trustedNodeExecutable();
   const profile = { filesystem: { ':minimal': 'read', [path]: 'write', [gitCommonDir]: 'read',
-    [join(path, '.git')]: 'read', [join(path, '.codex')]: 'read', [join(path, '.agents')]: 'read' },
+    [join(path, '.git')]: 'read', [join(path, '.codex')]: 'read', [join(path, '.agents')]: 'read', [nodeExecutable]: 'read' },
     network: { enabled: false } };
-  return { path, profile };
+  return { path, profile, nodeExecutable };
 }
 
 export function codexEnvironment(source = process.env, platform = process.platform) {
   const entries = Object.entries(source).filter(([key]) =>
-    !/^(OPENAI_API_KEY$|CODEX_API_KEY$|ENIGMA_)/i.test(key));
+    !/^(OPENAI_API_KEY$|OPENAI_ADMIN_KEY$|CODEX_API_KEY$|ENIGMA_)/i.test(key));
   if (platform !== 'win32') return Object.fromEntries(entries);
   const normalized = new Map();
   // Windows keys are case-insensitive. Match Node's deterministic first-key
@@ -48,7 +61,16 @@ export function codexEnvironment(source = process.env, platform = process.platfo
     const identity = key.toUpperCase();
     if (!normalized.has(identity)) normalized.set(identity, [identity === 'PATH' ? 'PATH' : key, value]);
   }
-  return Object.fromEntries(normalized.values());
+  const environment = Object.fromEntries(normalized.values());
+  const runtimeDirectory = dirname(trustedNodeExecutable());
+  if (environment.PATH !== undefined && (typeof environment.PATH !== 'string' || /[\x00\r\n]/.test(environment.PATH))) {
+    throw new TypeError('Invalid Windows child PATH.');
+  }
+  const searchPath = environment.PATH ?? '';
+  if (!searchPath.split(';').some(entry => pathIdentity(entry.replace(/^"|"$/g, '')) === pathIdentity(runtimeDirectory))) {
+    environment.PATH = searchPath ? `${searchPath};${runtimeDirectory}` : runtimeDirectory;
+  }
+  return environment;
 }
 
 /** One stdio app-server connection, with at most one active run. Never logs RPC data. */
@@ -81,6 +103,9 @@ export class CodexClient {
 
   async initialize() {
     try {
+      if (this.workspace && trustedNodeExecutable() !== this.workspace.nodeExecutable) {
+        throw safeError('CODEX_NODE_RUNTIME', 'The trusted Node executable changed before startup. No work was started.');
+      }
       const overrides = Object.entries(this.policyConfig).flatMap(([key, value]) => ['-c', `${key}=${toml(value)}`]);
       this.child = this.spawnFn(this.command, [...this.args, 'app-server', '--listen', 'stdio://', ...overrides], {
         cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true,
@@ -266,7 +291,7 @@ export class CodexClient {
           ...(threadId ? { threadId, excludeTurns: true } : {}), cwd, model, modelProvider: 'openai',
           approvalPolicy: 'on-request', approvalsReviewer: 'user',
           ...(this.workspace ? { permissions: PROFILE_ID, runtimeWorkspaceRoots: [this.workspace.path] } : { sandbox: 'workspace-write' }),
-          developerInstructions: instructions,
+          developerInstructions: this.workspace ? `${instructions}\n\nFor Node checks use the trusted running executable with Windows cmd.exe and login:false: "${this.workspace.nodeExecutable}" --test. Its exact file has read access. If the command fails, report the failure and leave the task recoverable; do not search private runtime folders or request broader access.` : instructions,
           config: { ...config, ...this.policyConfig, model, model_reasoning_effort: effort },
         };
         const result = await this.request(threadId ? 'thread/resume' : 'thread/start', params);
