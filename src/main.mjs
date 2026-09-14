@@ -11,6 +11,7 @@ import { WorktreeManager } from './worktrees.mjs';
 import { SlackConnection } from './slack.mjs';
 import { AgentService } from './service.mjs';
 import { configuredProjects, resolveProject } from './projects.mjs';
+import { EventWakeController } from './event-wake.mjs';
 
 export async function doctor(config, { log = console.log, Client = CodexClient } = {}) {
   const client = new Client({ command: config?.codexCommand || 'codex', cwd: config?.repoPath || process.cwd() });
@@ -39,20 +40,21 @@ export async function doctor(config, { log = console.log, Client = CodexClient }
   } finally { await client.close(); }
 }
 
-export async function start(config) {
+export async function start(config, { configFile = defaultConfigPath() } = {}) {
   await mkdir(config.stateDir, { recursive: true });
   const hash = createHash('sha256').update(path.resolve(config.stateDir).toLowerCase()).digest('hex').slice(0, 20);
   const lock = net.createServer(socket => socket.destroy());
   const address = process.platform === 'win32' ? `\\\\.\\pipe\\enigma-agents-${hash}` : { port: 30000 + parseInt(hash.slice(0, 6), 16) % 30000, host: '127.0.0.1' };
   await new Promise((resolve, reject) => { lock.once('error', () => reject(new Error('Another agent runner is active, or its local lock is unavailable.'))); lock.listen(address, resolve); });
   const log = text => console.log(`${new Date().toISOString()} ${redact(text)}`);
-  let store, service;
+  let store, service, wake;
   const connections = new Map();
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     for (const connection of connections.values()) connection.stop();
+    await wake?.stop();
     await service?.stop();
     store?.close(); lock.close();
     log('Agent runner stopped. Work is saved.');
@@ -72,6 +74,16 @@ export async function start(config) {
       await connection.start();
     }
     service.start();
+    if(config.eventWake?.enabled) {
+      wake=new EventWakeController({config,configFile,store,log,notice:(event,text)=> {
+        const bot=config.bots.find(value=>value.role==='atlas');
+        // Stable UUID makes crash recovery safe even if the journal acknowledgement is delayed.
+        store.db.prepare(`INSERT OR IGNORE INTO outbox(id,botKey,channel,text,createdAt,nextAttemptAt)
+          VALUES(?,?,?,?,?,?)`).run(event.id,bot.key,event.payload.channel,text,Date.now(),Date.now());
+      }});
+      wake.start();
+      log('Event wake enabled: completed Slack work and meaningful tracked PR changes queue host Atlas.');
+    }
     process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
     log(`Ready: ${config.bots.length} Slack bot(s); ${config.maxConcurrent} task(s) at a time.`);
     return { service, shutdown };
@@ -86,7 +98,7 @@ export async function main(args = process.argv.slice(2)) {
     const config = existsSync(configFile) ? loadConfig(configFile) : configIndex < 0 ? undefined : loadConfig(configFile);
     await doctor(config); return;
   }
-  await start(loadConfig(configFile));
+  await start(loadConfig(configFile), {configFile});
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -19,7 +19,7 @@ Use the configured user ID for Ken's mention and the configured destination IDs 
 
 Atlas verifies the repository, remote, branch, working-tree status, and existing PR before publishing. Specialists work in isolated worktrees and return local commits with test evidence; only Atlas pushes and creates or updates the PR. Preserve existing work and use the same PR throughout review and repairs.
 
-For Slack tasks whose sandbox prevents Git commits, Atlas's heartbeat also discovers completed edited work through the private task database and prepares it in an isolated integration worktree. It validates the saved project binding, source changes and inactive conversation before publishing. Read-only tasks need no PR; interrupted or ambiguous work stays preserved for explicit resolution. See `REVIEW-MONITOR.md` for the publication checks and recovery ledger. This operating policy does not give Slack workers additional Git permissions.
+For Slack tasks whose sandbox prevents Git commits, Host Atlas also discovers completed edited work through the private task database and prepares it in an isolated integration worktree. It validates the saved project binding, source changes and inactive conversation before publishing. Read-only tasks need no PR; interrupted or ambiguous work stays preserved for explicit resolution. See `REVIEW-MONITOR.md` for the publication checks and recovery ledger. This operating policy does not give Slack workers additional Git permissions.
 
 Complete appropriate tests, required project checks, and final diff review before marking the PR Ready for Review. The description should explain the change and actual validation. An in-progress draft may exist, but completed work must be ready for review.
 
@@ -39,11 +39,11 @@ There is no second Greptile pass after repairs. Do not post a manual `@greptilea
 
 ## Monitoring and recovery
 
-Atlas manages a Codex heartbeat scheduled on its configured schedule that reads trusted GitHub review evidence, coordinates repairs, and prepares the Slack handoff using existing authentication. This committed policy is not itself a running monitor. Heartbeat activation is managed separately by Atlas, and the full review-to-repair-to-Slack path remains pending live validation until Atlas reports observed results.
+Host Atlas reads trusted GitHub review evidence, coordinates repairs, and prepares the Slack handoff using existing authentication. When event wake is enabled, follow EVENT-WAKE.md and keep the time-based heartbeat paused. Completed Slack tasks and meaningful tracked PR changes queue the existing desktop host task. This committed policy is not itself a running monitor; activation and the actual review-to-repair-to-Slack path require separate live verification.
 
 The Slack bridge continues to ignore bot messages. The monitor reads GitHub directly; it must not enable arbitrary Slack bots as authorized users or treat review-bot Slack text as coding instructions.
 
-Keep durable progress under the configured private state directory outside Git and OneDrive. Record the repository and PR, initial review identity and reviewed commit, processed findings, repair commits, final check evidence, destination/thread IDs, and notification delivery state. Use the project's durable notice helper when available, with its documented arguments; do not invent command parameters. Recover from these records before taking action. A repeated heartbeat must not request another review, apply a repair twice, or send a duplicate ready notification. Recheck the PR head and readiness immediately before delivery; invalidate stale readiness when new changes appear.
+Keep durable progress under the configured private state directory outside Git and OneDrive. Record the repository and PR, initial review identity and reviewed commit, processed findings, repair commits, final check evidence, destination/thread IDs, and notification delivery state. Use the project's durable notice helper when available, with its documented arguments; do not invent command parameters. Recover from these records before taking action. A repeated event or monitor run must not request another review, apply a repair twice, or send a duplicate ready notification. Recheck the PR head and readiness immediately before delivery; invalidate stale readiness when new changes appear.
 
 ## Slack handoff and final Merge
 

@@ -21,6 +21,8 @@ Use **#enigma-work** for this bridge and **#jarvis-work** for Jarvis. Each proje
 
 The bridge checks the workspace, sender, and channel before accepting work. Bot messages and duplicate events are ignored. Workspaces and incomplete changes are retained after interruptions. Escalation requests are never automatically approved. Specialists prepare work for Atlas to review; the human clicks the final GitHub **Merge** action.
 
+With [event wake](docs/EVENT-WAKE.md) enabled, mentions start coding and completed tasks automatically queue host Atlas for the PR handoff. Agents stay idle between actionable events; the time-based AI heartbeat stays paused. A lightweight GitHub watcher checks only tracked PRs and wakes Atlas when review, checks, or merge state changes. Keep Codex open and the PC awake. Activation and actual delivery must be verified separately from installing the code.
+
 Private settings, encrypted Slack credentials, task history, and runtime worktrees live under `%LOCALAPPDATA%\EnigmaAgents`, outside OneDrive and Git. The Windows wrapper starts after you sign in, with a single process per state directory and bounded restart attempts. Your computer must stay awake and online. Messages sent while offline may need resending; interrupted work needs an explicit `resume`.
 
 For development, use Node.js 24+ and run:

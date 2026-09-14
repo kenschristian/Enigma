@@ -80,6 +80,76 @@ test('results are saved before delivery and failed delivery retries without reru
   assert.equal(calls.length,1);assert.equal(store.list()[0].status,'completed');store.close();
 });
 
+test('completion stays non-publishable until shutdown succeeds while the actual result is saved',async()=>{
+  let releaseClose, enteredClose;
+  const closing=new Promise(resolve=>{enteredClose=resolve;});
+  const {store,service}=fixture({clientFactory:()=>({start:async()=>{},
+    run:async p=>{await p.onThread('saved-thread');return {status:'completed',text:'Actual completed result'};},
+    close:()=>{enteredClose();return new Promise(resolve=>{releaseClose=resolve;});}})});
+  service.receive(event('E1','one'),connection);const task=store.list()[0];service.pump();await closing;
+  assert.equal(store.get(task.id).status,'running');
+  assert.equal(store.get(task.id).result,'Actual completed result');
+  assert.equal(store.get(task.id).codexThreadId,'saved-thread');
+  assert.equal(store.db.prepare("SELECT 1 FROM tasks WHERE id=? AND status='completed'").get(task.id),undefined);
+  assert.equal(store.db.prepare('SELECT text FROM outbox').all().some(message=>message.text.includes('— completed')),false);
+  releaseClose();await drained(service);
+  assert.equal(store.get(task.id).status,'completed');
+  assert.equal(store.db.prepare('SELECT text FROM outbox').all().filter(message=>message.text.includes('— completed')).length,1);
+  assert.equal(store.get(task.id).result,'Actual completed result');store.close();
+});
+
+test('failed shutdown preserves an interrupted result and restart cannot publish or automatically rerun it',async()=>{
+  const {store,service}=fixture({clientFactory:()=>({start:async()=>{},
+    run:async p=>{await p.onThread('recoverable-thread');return {status:'completed',text:'Preserved successful result'};},
+    close:async()=>{throw new Error('private shutdown payload');}})});
+  service.receive(event('E1','one'),connection);const task=store.list()[0];service.pump();await drained(service);
+  assert.equal(service.stopping,true);assert.equal(store.get(task.id).status,'interrupted');
+  assert.equal(store.get(task.id).error,'CODEX_SHUTDOWN');assert.equal(store.get(task.id).result,'Preserved successful result');
+  assert.equal(store.get(task.id).codexThreadId,'recoverable-thread');
+  assert.equal(store.db.prepare('SELECT text FROM outbox').all().some(message=>message.text.includes('— completed')),false);
+  assert.equal(store.db.prepare('SELECT text FROM outbox').all().some(message=>message.text.includes('private shutdown payload')),false);
+  assert.equal(store.db.prepare('SELECT text FROM outbox').all().some(message=>message.text.includes('CODEX_SHUTDOWN')),true);
+  let starts=0;
+  const restarted=new AgentService({config:{...config},store,worktrees:service.worktrees,
+    clientFactory:()=>{starts++;throw new Error('must not automatically rerun');}});
+  restarted.start();
+  assert.equal(starts,0);assert.equal(store.get(task.id).status,'interrupted');
+  assert.equal(store.db.prepare("SELECT 1 FROM tasks WHERE id=? AND status='completed'").get(task.id),undefined);
+  assert.equal(store.get(task.id).result,'Preserved successful result');
+  restarted.receive(event('E2','followup'),connection);restarted.pump();
+  assert.equal(starts,0);assert.equal(store.list().find(value=>value.eventId==='atlas:E2').status,'cancelled');
+  await restarted.stop();store.close();
+});
+
+test('cancellation during successful or failed cleanup remains cancelled without a completion notice',async()=>{
+  for(const shutdownFails of [false,true]) {
+    let releaseClose, enteredClose;
+    const closing=new Promise(resolve=>{enteredClose=resolve;});
+    const {store,service}=fixture({clientFactory:()=>({start:async()=>{},
+      run:async()=>({status:'completed',text:'Result before cancellation'}),
+      close:()=>{enteredClose();return new Promise((resolve,reject)=>{releaseClose=()=>shutdownFails?reject(new Error('shutdown failed')):resolve();});}})});
+    service.receive(event('E1','one'),connection);const task=store.list()[0];service.pump();await closing;
+    service.receive(event('E2',`cancel ${task.id}`),connection);releaseClose();await drained(service);
+    assert.equal(store.get(task.id).status,'cancelled');
+    assert.equal(store.get(task.id).result,'Result before cancellation');
+    assert.equal(store.db.prepare('SELECT text FROM outbox').all().some(message=>message.text.includes('— completed')),false);
+    assert.equal(service.stopping,shutdownFails);store.close();
+  }
+});
+
+test('listener shutdown during cleanup does not mark work completed',async()=>{
+  let releaseClose, enteredClose;
+  const closing=new Promise(resolve=>{enteredClose=resolve;});
+  const {store,service}=fixture({clientFactory:()=>({start:async()=>{},
+    run:async()=>({status:'completed',text:'Saved before listener stop'}),
+    close:()=>{enteredClose();return new Promise(resolve=>{releaseClose=resolve;});}})});
+  service.receive(event('E1','one'),connection);const task=store.list()[0];service.pump();await closing;
+  const stopped=service.stop();releaseClose();await stopped;
+  assert.equal(store.get(task.id).status,'interrupted');
+  assert.equal(store.get(task.id).result,'Saved before listener stop');
+  assert.equal(store.db.prepare('SELECT text FROM outbox').all().some(message=>message.text.includes('— completed')),false);store.close();
+});
+
 test('project channels choose their own repository and keep saved conversations separate',async()=>{
   const selected=[],calls=[];
   const {store,service}=fixture({config:{allowedChannelIds:['C1','C2']},

@@ -114,6 +114,7 @@ export class AgentService {
 
   async run(task, signal) {
     let client;
+    let completion;
     let approvalNeeded = false;
     try {
       const bot = this.config.bots?.find(bot => bot.key === task.botKey);
@@ -175,8 +176,10 @@ export class AgentService {
       if (signal.aborted || this.store.get(task.id).status === 'cancelled') return;
       const status = approvalNeeded ? 'interrupted' : outcome.status === 'completed' ? 'completed' : outcome.status === 'interrupted' ? 'interrupted' : 'failed';
       const result = redact(outcome.text || 'No final answer was returned.');
-      this.store.update(task.id, { status, result, error: status === 'completed' ? null : 'Needs attention. Review the task before resuming.' });
-      this.reply(task, `${ROLES[task.role]} — ${status}\nTask ${task.id}\nBranch: ${worktree.branch}\n\n${result}${approvalNeeded ? '\n\nAn action requires approval in Codex. It was not approved through Slack. Open the saved work in Codex to review it.' : ''}`);
+      // Preserve the actual result before cleanup, but leave the task running.
+      // Host publication must not observe completion until shutdown is confirmed.
+      this.store.update(task.id, { result });
+      completion = { status, result, branch: worktree.branch };
     } catch (error) {
       const current = this.store.get(task.id);
       if (current.status !== 'cancelled') {
@@ -193,7 +196,20 @@ export class AgentService {
       }
     } finally {
       try { await client?.close(); }
-      catch { this.stopping = true; this.log('Codex did not confirm shutdown. The task queue is paused; restart after checking the saved work.'); }
+      catch {
+        this.stopping = true;
+        completion = null;
+        if (this.store.get(task.id).status !== 'cancelled') {
+          this.store.update(task.id, { status: 'interrupted', error: 'CODEX_SHUTDOWN' });
+          this.reply(task, `Task ${task.id} interrupted (CODEX_SHUTDOWN). Codex shutdown could not be confirmed. Saved results and files are preserved. Verify the worker has stopped before restarting the listener or resuming this task.`);
+        }
+        this.log('Codex did not confirm shutdown. The task queue is paused; restart after checking the saved work.');
+      }
+    }
+    if (completion && this.store.get(task.id).status !== 'cancelled') {
+      const status = this.stopping || signal.aborted ? 'interrupted' : completion.status;
+      this.store.update(task.id, { status, error: status === 'completed' ? null : 'Needs attention. Review the task before resuming.' });
+      this.reply(task, `${ROLES[task.role]} — ${status}\nTask ${task.id}\nBranch: ${completion.branch}\n\n${completion.result}${approvalNeeded ? '\n\nAn action requires approval in Codex. It was not approved through Slack. Open the saved work in Codex to review it.' : ''}`);
     }
   }
 

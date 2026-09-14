@@ -77,6 +77,26 @@ export function validateConfig(value, { env = process.env, requireTokens = true 
       if (requireTokens && !env[bot[key]]?.startsWith(prefix)) fail(`${bot.key} credentials are missing. Use Start-Agents.ps1 after Setup.ps1.`);
     }
   }
+  if (c.eventWake !== undefined) {
+    const wake=c.eventWake;
+    if(!wake || typeof wake!=='object' || Array.isArray(wake) || typeof wake.enabled!=='boolean') fail('eventWake requires an explicit enabled boolean.');
+    if(wake.enabled) {
+      if(typeof wake.threadId!=='string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(wake.threadId)) fail('eventWake requires the verified existing host task UUID.');
+      if(!Number.isSafeInteger(wake.taskSequenceFloor) || wake.taskSequenceFloor<0) fail('eventWake requires an explicit task activation boundary.');
+      wake.githubPollSeconds ??= 60;
+      if(!Number.isInteger(wake.githubPollSeconds) || wake.githubPollSeconds<30 || wake.githubPollSeconds>3600) fail('eventWake GitHub interval must be 30 to 3600 seconds.');
+      if(!c.projects || c.bots.filter(bot=>bot.role==='atlas').length!==1) fail('eventWake requires explicit projects and one Atlas connection.');
+      const repositories=new Set();
+      for(const project of c.projects) {
+        if(typeof project.repositoryFullName!=='string' || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(project.repositoryFullName) ||
+          ['.','..'].includes(project.repositoryFullName.split('/')[1]) || repositories.has(project.repositoryFullName.toLowerCase())) fail('eventWake requires unique explicit GitHub repositories.');
+        repositories.add(project.repositoryFullName.toLowerCase());
+        const channels=['work','pullRequests','codeReview','updates'].map(key=>project.channels?.[key]);
+        if(channels.some(id=>!project.channelIds.includes(id)) || new Set(channels).size!==4) fail('eventWake requires all four distinct mapped project channels.');
+      }
+      if([c.repoPath,c.stateDir,c.worktreesRoot,c.codexCommand,...c.projects.map(p=>p.repoPath)].some(value=>/[\x00-\x1f]/.test(value))) fail('eventWake paths cannot contain control characters.');
+    }
+  }
   return c;
 }
 
