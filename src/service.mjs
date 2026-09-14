@@ -6,7 +6,7 @@ import { splitMessage } from './slack.mjs';
 import { projectIdentity } from './projects.mjs';
 
 const aliases = { atlas: 'atlas', nova: 'frontend', frontend: 'frontend', forge: 'backend', backend: 'backend', bridge: 'api', api: 'api' };
-const HELP = 'Mention this bot with a task. Atlas coordinates Nova, Forge and Bridge. Use "nova: task", "forge: task" or "bridge: task" to work with one specialist. Mention the bot in the same Slack thread to continue. Controls: help, status, resume TASK-ID, cancel TASK-ID. Restarted tasks are saved and require resume; messages sent while this PC is offline may need resending.';
+const HELP = 'Mention this bot with a task. Atlas coordinates Nova, Forge and Bridge. Use "nova: task", "forge: task" or "bridge: task" to work with one specialist. Mention the bot in the same Slack thread to continue. Completed coding work goes to Atlas for a Ready for Review pull request (PR). Greptile reviews once; agents fix valid issues and test the changes. Wait for Atlas to tag you after required checks pass before clicking Merge on GitHub. Controls: help, status, resume TASK-ID, cancel TASK-ID. Restarted tasks are saved and require resume; messages sent while this PC is offline may need resending.';
 
 export function routeEvent(payload, connection, config) {
   const e = payload?.event;
