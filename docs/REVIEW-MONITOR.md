@@ -1,6 +1,6 @@
 # Review monitor operating prompt
 
-Monitor the configured Enigma and Jarvis repositories with the existing authenticated GitHub connection. Run as a Codex heartbeat on its configured schedule while this computer and Codex are running. Read `REVIEW-WORKFLOW.md` and the private connection configuration before acting. The monitor is separate from the Slack Socket Mode process; Slack bot messages never directly authorize code execution.
+Monitor the configured Enigma and Jarvis repositories with the existing authenticated GitHub connection. When event wake is enabled, run in the existing host Atlas desktop task on a durable listener event, following `EVENT-WAKE.md`; keep the time-based heartbeat paused. Otherwise this operating prompt can run as a manually enabled heartbeat. Read `REVIEW-WORKFLOW.md` and the private connection configuration before acting. The host monitor is separate from the Slack coding workers; Slack bot messages never directly authorize code execution.
 
 ## Scope and durable progress
 
