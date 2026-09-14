@@ -1,13 +1,15 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param([string]$Config = (Join-Path $env:LOCALAPPDATA 'EnigmaAgents\config.json'), [switch]$Doctor)
-. (Join-Path $PSScriptRoot 'Common.ps1')
+. (Join-Path $PSScriptRoot 'Resolve-StartupPaths.ps1')
 $process = $null
 $lock = $null
 $started = $false
 $exitCode = 1
 $stage = 'configuration-path'
 $logPath = $null
+$processRecordPath = $null
+$processRecord = $null
 
 function Write-RunnerDiagnostic([string]$EventName, [string]$Detail = '') {
     if (-not $logPath) { return }
@@ -33,6 +35,20 @@ try {
         $stage = 'process-lock'
         try { $lock = [IO.File]::Open((Join-Path $stateDir 'runner.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
         catch [IO.IOException] { Write-Host 'Enigma is already running or its state directory is unavailable.'; exit 0 }
+        $processRecordPath = Assert-PrivatePath (Join-Path $privateRoot 'runner-process.json')
+        if (Test-Path -LiteralPath $processRecordPath) {
+            $recorded = Get-Content -LiteralPath $processRecordPath -Raw | ConvertFrom-Json
+            if ($recorded.version -ne 1 -or [string]$recorded.processId -notmatch '^[1-9][0-9]{0,9}$' -or
+                [string]$recorded.creationUtcTicks -notmatch '^[0-9]{1,19}$') { throw 'Existing runner identity is invalid.' }
+            $existingChild = Get-Process -Id ([int]$recorded.processId) -ErrorAction SilentlyContinue
+            if ($existingChild) {
+                try {
+                    if ($existingChild.StartTime.ToUniversalTime().Ticks -eq [long]$recorded.creationUtcTicks) {
+                        throw 'A recorded runner is still active. Use Restart-Agents.ps1 to verify and stop it.'
+                    }
+                } finally { $existingChild.Dispose() }
+            }
+        }
     }
     $stage = 'process-configuration'
     $start = New-Object Diagnostics.ProcessStartInfo
@@ -68,6 +84,17 @@ try {
     $stage = 'process-start'
     [void]$process.Start()
     $started = $true
+    if (-not $Doctor) {
+        $processRecord = @{
+            version = 1
+            processId = $process.Id
+            creationUtcTicks = $process.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+            nodePath = Get-EnigmaPhysicalPath $start.FileName
+            mainPath = Get-EnigmaPhysicalPath (Join-Path $start.WorkingDirectory 'src\main.mjs')
+            configPath = Get-EnigmaPhysicalPath $Config
+        }
+        Write-PrivateJson $processRecordPath $processRecord
+    }
     Write-RunnerDiagnostic 'child-started' ('childPid=' + $process.Id)
     # Drain both streams concurrently without retaining prompts, RPC payloads, or secrets.
     $stdout = $process.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
@@ -94,6 +121,14 @@ try {
         if ($started -and -not $process.HasExited) {
             # Terminate this known child tree only; never search for unrelated Node/Codex processes.
             & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F *> $null
+        }
+        if ($processRecord -and $process.HasExited -and (Test-Path -LiteralPath $processRecordPath)) {
+            try {
+                $recorded = Get-Content -LiteralPath $processRecordPath -Raw | ConvertFrom-Json
+                if ($recorded.processId -eq $processRecord.processId -and $recorded.creationUtcTicks -eq $processRecord.creationUtcTicks) {
+                    Remove-Item -LiteralPath $processRecordPath -Force
+                }
+            } catch { } # Preserve unreadable or replaced records for inspection.
         }
         $process.Dispose()
     }
