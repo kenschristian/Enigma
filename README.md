@@ -13,7 +13,11 @@ Start with **[Windows setup](docs/SETUP.md)**. Slack workspace: [enigma777](http
 @Atlas status
 @Atlas resume <task-id>
 @Atlas cancel <task-id>
+@Atlas use devin
+@Atlas prepare a Devin prompt: Fix the settings page and add a regression check.
 ```
+
+You can also choose [native Devin](docs/DEVIN-WORKFLOW.md) in a fresh thread. Ask Atlas to reserve it or prepare a structured prompt, then send your own `@Devin` mention in that thread. Preparation uses no model call. Enigma blocks its Codex workers in Devin-selected threads; it cannot observe native-only mentions or stop Devin itself. Executor changes need a new thread and preservation of any earlier work. No usage monitoring or automatic provider switching is performed.
 
 Use a real Slack mention in an explicitly allowed channel. These are ordinary messages, not slash commands. The team profiles are **Atlas - Manager**, **Forge - Back End Engineer**, **Nova - Front End Engineer**, and **Bridge - API Engineer**, each with its own [avatar](assets/agents/README.md). Mention Atlas for coordinated work or a specialist for its own responsibility. Runtime roles remain `frontend`, `backend`, and `api`; at most three specialists run concurrently.
 

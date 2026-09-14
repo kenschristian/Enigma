@@ -4,9 +4,10 @@ import { MODEL, ROLES, redact } from './config.mjs';
 import { roleInstructions, agentConfig } from './roles.mjs';
 import { splitMessage } from './slack.mjs';
 import { projectIdentity } from './projects.mjs';
+import { taskKind, DEVIN_SELECTED, executorError, devinPrompt } from './executors.mjs';
 
 const aliases = { atlas: 'atlas', nova: 'frontend', frontend: 'frontend', forge: 'backend', backend: 'backend', bridge: 'api', api: 'api' };
-const HELP = 'Mention this bot with a task. Atlas coordinates Nova, Forge and Bridge. Use "nova: task", "forge: task" or "bridge: task" to work with one specialist. Mention the bot in the same Slack thread to continue. Completed coding work goes to Atlas for a Ready for Review pull request (PR). Greptile reviews once; agents fix valid issues and test the changes. Wait for Atlas to tag you after required checks pass before clicking Merge on GitHub. Controls: help, status, resume TASK-ID, cancel TASK-ID. Restarted tasks are saved and require resume; messages sent while this PC is offline may need resending.';
+const HELP = 'Mention this bot with a task. Atlas coordinates Nova, Forge and Bridge. Use "nova: task", "forge: task" or "bridge: task" to work with one specialist. Mention the bot in the same Slack thread to continue. To reserve a fresh thread for native Devin, mention Atlas with "use devin" or "prepare a Devin prompt: TASK". Preparation returns a structured template with zero model calls and no code investigation. Then send your task directly to @Devin; Enigma cannot observe that mention or verify native sessions. Thread executor selections are permanent; use a fresh thread for a different executor and never launch both for the same task. Completed coding work goes to Atlas for a Ready for Review pull request (PR). Greptile reviews once; agents fix valid issues and test the changes. Wait for Atlas to tag you after required checks pass before clicking Merge on GitHub. Controls: help, status, resume TASK-ID, cancel TASK-ID. Restarted tasks are saved and require resume; messages sent while this PC is offline may need resending.';
 
 export function routeEvent(payload, connection, config) {
   const e = payload?.event;
@@ -41,9 +42,23 @@ export class AgentService {
   receive(payload, connection) {
     const input = routeEvent(payload, connection, this.config);
     if (!input) return false;
+    const selectDevin = /^use\s+devin$/i.test(input.prompt);
+    const prepareDevin = /^prepare\s+a\s+devin\s+prompt\b/i.test(input.prompt);
+    if (selectDevin || prepareDevin) {
+      const prepared = input.prompt.match(/^prepare\s+a\s+devin\s+prompt\s*:\s*([\s\S]*)$/i)?.[1]?.trim();
+      const invalid = connection.bot.role !== 'atlas' || input.role !== 'atlas'
+        ? 'Mention Atlas directly to select Devin or prepare its prompt.'
+        : input.prompt.length > 20000 ? 'Please split this request into messages under 20,000 characters.'
+        : prepareDevin && !prepared ? 'Use "prepare a Devin prompt: TASK" with a nonempty task.' : null;
+      this.store.enqueueWithReply({ ...input, conversationKey: `${input.conversationKey}:control`,
+        kind: invalid ? 'control' : prepareDevin ? 'devin-prompt' : 'devin-selection',
+        prompt: (prepared || input.prompt).slice(0, 20000),
+      }, task => splitMessage(redact(invalid || (task.error ? executorError(task.error) : prepareDevin ? devinPrompt(task, this.config) : DEVIN_SELECTED))));
+      return true;
+    }
     const control = input.prompt.match(/^(help|status|resume|cancel)(?:\s+(\S+))?$/i);
     if (control || !input.prompt || input.prompt.length > 20000 || this.store.list({ status: 'queued', limit: 100 }).length >= 100) {
-      const { created, task } = this.store.enqueue({ ...input, conversationKey: `${input.conversationKey}:control`, prompt: input.prompt.slice(0,20000) || 'help' });
+      const { created, task } = this.store.enqueue({ ...input, kind: 'control', conversationKey: `${input.conversationKey}:control`, prompt: input.prompt.slice(0,20000) || 'help' });
       if (!created) return true;
       this.store.update(task.id, { status: 'completed' });
       if (!input.prompt) this.reply(task, HELP);
@@ -56,7 +71,8 @@ export class AgentService {
     const blocked = this.store.interruptedTask(input.conversationKey);
     const { created, task } = this.store.enqueue(input);
     if (created) {
-      if (blocked) { this.store.update(task.id, { status: 'cancelled' }); this.reply(task, `Task ${blocked.id} was interrupted. Use resume ${blocked.id} before sending more work in this thread.`); }
+      if (task.error) this.reply(task, executorError(task.error));
+      else if (blocked) { this.store.update(task.id, { status: 'cancelled' }); this.reply(task, `Task ${blocked.id} was interrupted. Use resume ${blocked.id} before sending more work in this thread.`); }
       else this.reply(task, `${ROLES[task.role]} queued task ${task.id}. Use status to check progress.`);
     }
     return true;
@@ -66,11 +82,14 @@ export class AgentService {
     if (command === 'help') return this.reply(task, HELP);
     if (command === 'status') {
       const tasks = this.store.list({ limit: 100 }).filter(t => t.userId === task.userId && t.channel === task.channel && !t.conversationKey.endsWith(':control')).slice(0, 10);
-      return this.reply(task, tasks.length ? tasks.map(t => `${t.id} | ${ROLES[t.role]} | ${t.status}${t.branch ? ` | ${t.branch}` : ''}`).join('\n') : 'No tasks yet in this channel.');
+      const owner = this.store.threadExecutor(task);
+      return this.reply(task, `${owner ? `This thread’s executor: ${owner.executor}.${owner.executor === 'devin' ? ' Native session state is not observed.' : ''}\n` : ''}${tasks.length ? tasks.map(t => `${t.id} | ${ROLES[t.role]} | ${t.status}${t.branch ? ` | ${t.branch}` : ''}`).join('\n') : 'No tasks yet in this channel.'}`);
     }
     const target = id ? this.store.get(id) : null;
-    if (!target || target.userId !== task.userId || target.channel !== task.channel || target.teamId !== task.teamId || target.conversationKey.endsWith(':control')) return this.reply(task, 'Task not found. Use status and copy its full task ID.');
+    if (!target || target.userId !== task.userId || target.channel !== task.channel || target.teamId !== task.teamId || taskKind(target) !== 'coding') return this.reply(task, 'Task not found. Use status and copy its full task ID.');
     if (command === 'resume') {
+      const conflict = this.store.executorConflict(target, 'codex');
+      if (conflict) return this.reply(task, executorError(conflict));
       if (!['interrupted', 'failed', 'cancelled'].includes(target.status)) return this.reply(task, 'Only interrupted, failed or cancelled tasks can be resumed.');
       const newer = this.store.hasLaterActiveTask(target.id);
       if (newer) return this.reply(task, 'A newer task exists in that conversation. Continue the latest task or start a new Slack thread.');
@@ -97,6 +116,12 @@ export class AgentService {
     while (this.active.size < this.config.maxConcurrent) {
       const task = this.store.nextQueued();
       if (!task) break;
+      const conflict = this.store.executorConflict(task, 'codex');
+      if (taskKind(task) !== 'coding' || conflict) {
+        this.store.update(task.id, { status: 'cancelled', error: conflict || 'NON_CODING_TASK' });
+        this.reply(task, conflict ? executorError(conflict) : 'This saved control cannot run as a coding task.');
+        continue;
+      }
       if ([...this.active.values()].some(a => a.conversationKey === task.conversationKey)) break;
       const interrupted = this.store.interruptedTask(task.conversationKey, task.id);
       if (interrupted) {
@@ -117,6 +142,9 @@ export class AgentService {
     let completion;
     let approvalNeeded = false;
     try {
+      if (taskKind(task) !== 'coding' || this.store.executorConflict(task, 'codex')) {
+        throw Object.assign(new Error('Thread executor prevents coding.'), { code: 'THREAD_RESERVED_DEVIN' });
+      }
       const bot = this.config.bots?.find(bot => bot.key === task.botKey);
       if (task.teamId !== this.config.allowedTeamId || !this.config.allowedUserIds?.includes(task.userId) ||
           !this.config.allowedChannelIds?.includes(task.channel) || !bot || !Object.hasOwn(ROLES, task.role) ||
