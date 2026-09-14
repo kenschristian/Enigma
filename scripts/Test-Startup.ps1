@@ -11,6 +11,9 @@ $worktreesRoot = Join-Path $testRoot 'worktrees'
 $fixtureProcess = $null
 $fixtureDescendant = $null
 $verifiedChild = $null
+$fixtureInstall = Join-Path $testRoot 'runner-install'
+$fixtureScripts = Join-Path $fixtureInstall 'scripts'
+$fixtureSource = Join-Path $fixtureInstall 'src'
 try {
     [void](Initialize-PrivateDirectory $testRoot)
     [void](Initialize-PrivateDirectory $stateDir)
@@ -41,12 +44,15 @@ try {
     if ($log -notmatch 'event=child-started childPid=\d+' -or $log -notmatch 'event=child-exited exitCode=1') { throw 'Child lifecycle diagnostics are missing.' }
     if ($output -match 'VoidTaskResult') { throw 'Internal stream-drain task results leaked to output.' }
 
-    # A normal failing child must clear its own record; doctor must leave another
+    # A failing child must preserve its record; doctor must leave another
     # runner's provenance untouched. No synthetic configuration has valid tokens.
     $output = @(& (Join-Path $PSScriptRoot 'Start-Agents.ps1') -Config $resolvedConfig *>&1) -join "`n"
-    if ($LASTEXITCODE -ne 1 -or (Test-Path -LiteralPath $recordPath)) { throw 'Exited runner provenance was not cleaned up.' }
+    if ($LASTEXITCODE -ne 1 -or -not (Test-Path -LiteralPath $recordPath)) { throw 'Abnormal runner exit lost recovery provenance.' }
     $log = Get-Content -LiteralPath $logPath -Raw
     if ([regex]::Matches($log, 'event=child-started childPid=\d+').Count -ne 2) { throw 'The normal runner failed before recording its child.' }
+    $failedRecord = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+    if (-not $failedRecord.PSObject.Properties['bootCounter'] -or -not $failedRecord.PSObject.Properties['bootUtcTicks']) { throw 'The new runner record lacks boot provenance.' }
+    Remove-Item -LiteralPath $recordPath
     Write-PrivateJson $recordPath @{ version = 1; processId = 1; creationUtcTicks = '1' }
     $recordBeforeDoctor = [IO.File]::ReadAllText($recordPath)
     $output = @(& (Join-Path $PSScriptRoot 'Start-Agents.ps1') -Config $resolvedConfig -Doctor *>&1) -join "`n"
@@ -76,6 +82,15 @@ try {
         creationUtcTicks = $fixtureProcess.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
         nodePath = Get-EnigmaPhysicalPath $node; mainPath = Get-EnigmaPhysicalPath $fixtureMain
         configPath = Get-EnigmaPhysicalPath $resolvedConfig
+        bootCounter = (Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters' -Name BootId).ToString()
+        bootUtcTicks = (Get-CimInstance Win32_OperatingSystem -Property LastBootUpTime).LastBootUpTime.ToUniversalTime().Ticks.ToString()
+    }
+    function Assert-FixtureStartupRefused([string]$StartScript = (Join-Path $PSScriptRoot 'Start-Agents.ps1')) {
+        $beforeRecord = [IO.File]::ReadAllText($recordPath)
+        $beforeStarts = [regex]::Matches([IO.File]::ReadAllText($logPath), 'event=child-started childPid=\d+').Count
+        $output = @(& $StartScript -Config $resolvedConfig *>&1) -join "`n"
+        if ($LASTEXITCODE -ne 1 -or [IO.File]::ReadAllText($recordPath) -cne $beforeRecord -or
+            [regex]::Matches([IO.File]::ReadAllText($logPath), 'event=child-started childPid=\d+').Count -ne $beforeStarts) { throw 'Unsafe stale-record replacement or child launch.' }
     }
     # Simulate PID reuse, forged main/config mappings, and a command line which
     # differs from the stored expected config. Every refusal must leave it alive.
@@ -89,6 +104,10 @@ try {
             'arguments' { $candidate.configPath = $otherConfig; $expectedConfig = $otherConfig }
         }
         Write-PrivateJson $recordPath $candidate
+        if ($mismatch -eq 'creation') {
+            Assert-FixtureStartupRefused
+            if ($fixtureProcess.HasExited -or $fixtureDescendant.HasExited) { throw 'A PID mismatch stopped the synthetic process tree.' }
+        }
         $refused = $false
         try { $unexpected = Get-EnigmaRecordedChild $recordPath $node $fixtureMain $expectedConfig }
         catch {
@@ -113,6 +132,8 @@ try {
     $fixtureProcess.Kill()
     [void]$fixtureProcess.WaitForExit(5000)
     if ($fixtureDescendant.HasExited) { throw 'The surviving-child fixture exited too soon.' }
+    Assert-FixtureStartupRefused
+    if ($fixtureDescendant.HasExited) { throw 'Startup changed the surviving synthetic child.' }
     Stop-EnigmaRecordedChild $verifiedChild $recordPath
     if (-not $fixtureDescendant.WaitForExit(5000) -or (Test-Path -LiteralPath $recordPath)) { throw 'The verified surviving child was not stopped and cleared.' }
     foreach ($descendant in $verifiedChild.Descendants) { $descendant.Dispose() }
@@ -140,13 +161,122 @@ try {
         $absentRefused = $true
     }
     if (-not $absentRefused -or -not (Test-Path -LiteralPath $recordPath)) { throw 'An absent root was treated as proof of a clean process tree.' }
-    $output = @(& (Join-Path $PSScriptRoot 'Start-Agents.ps1') -Config $resolvedConfig *>&1) -join "`n"
-    # Normal logon startup must replace records left over from a prior OS boot.
-    if ($LASTEXITCODE -ne 1 -or (Test-Path -LiteralPath $recordPath)) { throw 'Normal startup could not replace stale provenance.' }
+    Assert-FixtureStartupRefused
     $verifiedChild.Process.Dispose()
     $verifiedChild = $null
     $fixtureProcess.Dispose()
     $fixtureProcess = $null
+
+    # Model boot boundaries without changing OS clocks, registry, or live state.
+    # Existing record timestamps use real valid UTC dates; only the evidence
+    # readers are mocked, while the actual startup path and Node launch run.
+    $actualBoot = (Get-CimInstance Win32_OperatingSystem -Property LastBootUpTime).LastBootUpTime
+    $bootFixture = @{ counter = 2; systems = @([pscustomobject]@{ LastBootUpTime = $actualBoot }); fail = $false }
+    function Get-ItemPropertyValue { [CmdletBinding()] param([string]$LiteralPath, [string]$Name) return $bootFixture.counter }
+    function Get-CimInstance {
+        [CmdletBinding()] param([string]$ClassName, [string[]]$Property)
+        if ($bootFixture.fail) { throw 'Synthetic unavailable boot evidence.' }
+        return $bootFixture.systems
+    }
+    try {
+        $priorBoot = $record.Clone()
+        $priorBoot.bootCounter = '1'
+        $priorBoot.creationUtcTicks = ($actualBoot.ToUniversalTime().Ticks - 1).ToString()
+        $priorBoot.bootUtcTicks = ($actualBoot.ToUniversalTime().Ticks - [TimeSpan]::TicksPerDay).ToString()
+        foreach ($case in @('same-counter', 'reset-counter', 'missing-counter', 'bool-counter', 'unavailable', 'null-boot', 'multiple-boots', 'future-boot', 'ambiguous-boot', 'creation-equal-boot', 'future-creation', 'zero-creation', 'overflow-creation', 'bad-chronology', 'legacy')) {
+            $candidate = $priorBoot.Clone()
+            $bootFixture.counter = 2
+            $bootFixture.systems = @([pscustomobject]@{ LastBootUpTime = $actualBoot })
+            $bootFixture.fail = $false
+            switch ($case) {
+                'same-counter' { $candidate.bootCounter = '2' }
+                'reset-counter' { $candidate.bootCounter = '3' }
+                'missing-counter' { $bootFixture.counter = $null }
+                'bool-counter' { $bootFixture.counter = $true }
+                'unavailable' { $bootFixture.fail = $true }
+                'null-boot' { $bootFixture.systems = @([pscustomobject]@{ LastBootUpTime = $null }) }
+                'multiple-boots' { $bootFixture.systems = @($bootFixture.systems[0], $bootFixture.systems[0]) }
+                'future-boot' { $bootFixture.systems = @([pscustomobject]@{ LastBootUpTime = [datetime]::UtcNow.AddDays(1) }) }
+                'ambiguous-boot' { $bootFixture.systems = @([pscustomobject]@{ LastBootUpTime = [datetime]::SpecifyKind($actualBoot, [DateTimeKind]::Unspecified) }) }
+                'creation-equal-boot' { $candidate.creationUtcTicks = $actualBoot.ToUniversalTime().Ticks.ToString() }
+                'future-creation' { $candidate.creationUtcTicks = [datetime]::UtcNow.AddDays(1).Ticks.ToString() }
+                'zero-creation' { $candidate.creationUtcTicks = '0' }
+                'overflow-creation' { $candidate.creationUtcTicks = '9999999999999999999' }
+                'bad-chronology' { $candidate.bootUtcTicks = $actualBoot.ToUniversalTime().Ticks.ToString() }
+                'legacy' { $candidate.Remove('bootCounter'); $candidate.Remove('bootUtcTicks') }
+            }
+            Write-PrivateJson $recordPath $candidate
+            Assert-FixtureStartupRefused
+        }
+        # Proven earlier boot permits replacing the stale record, even if that
+        # PID belongs to a new process. The unrelated process must remain alive.
+        $bootFixture.counter = 2
+        $bootFixture.systems = @([pscustomobject]@{ LastBootUpTime = $actualBoot })
+        $bootFixture.fail = $false
+        $fixtureProcess = [Diagnostics.Process]::Start($fixtureStart)
+        $priorBoot.processId = $fixtureProcess.Id
+        $fixtureProcess.Kill()
+        [void]$fixtureProcess.WaitForExit(5000)
+        # Retain the exited handle so the absent PID cannot be reused in this case.
+        Write-PrivateJson $recordPath $priorBoot
+        $beforeStarts = [regex]::Matches([IO.File]::ReadAllText($logPath), 'event=child-started childPid=\d+').Count
+        $output = @(& (Join-Path $PSScriptRoot 'Start-Agents.ps1') -Config $resolvedConfig *>&1) -join "`n"
+        if ($LASTEXITCODE -ne 1 -or -not (Test-Path -LiteralPath $recordPath) -or
+            [regex]::Matches([IO.File]::ReadAllText($logPath), 'event=child-started childPid=\d+').Count -ne $beforeStarts + 1) { throw 'Proven prior-boot startup with an absent root failed.' }
+        $replacement = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+        if ($replacement.bootCounter -ne '2' -or $replacement.processId -eq $priorBoot.processId) { throw 'Prior-boot record was not replaced by current provenance.' }
+        Remove-Item -LiteralPath $recordPath
+        $fixtureProcess.Dispose()
+        $fixtureProcess = $null
+        $fixtureProcess = [Diagnostics.Process]::Start($fixtureStart)
+        $priorBoot.processId = $fixtureProcess.Id
+        Write-PrivateJson $recordPath $priorBoot
+        $beforeStarts = [regex]::Matches([IO.File]::ReadAllText($logPath), 'event=child-started childPid=\d+').Count
+        $output = @(& (Join-Path $PSScriptRoot 'Start-Agents.ps1') -Config $resolvedConfig *>&1) -join "`n"
+        if ($LASTEXITCODE -ne 1 -or -not (Test-Path -LiteralPath $recordPath) -or $fixtureProcess.HasExited -or
+            [regex]::Matches([IO.File]::ReadAllText($logPath), 'event=child-started childPid=\d+').Count -ne $beforeStarts + 1) { throw 'Proven prior-boot startup failed or touched the unrelated PID.' }
+        $replacement = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+        if ($replacement.bootCounter -ne '2' -or $replacement.processId -eq $priorBoot.processId) { throw 'Prior-boot PID reuse did not produce new provenance.' }
+        Remove-Item -LiteralPath $recordPath
+        # Even older counter evidence cannot bypass an exact active identity.
+        $priorBoot.creationUtcTicks = $fixtureProcess.StartTime.ToUniversalTime().Ticks.ToString()
+        Write-PrivateJson $recordPath $priorBoot
+        Assert-FixtureStartupRefused
+        Remove-Item -LiteralPath $recordPath
+        $fixtureProcess.Kill()
+        [void]$fixtureProcess.WaitForExit(5000)
+        $fixtureProcess.Dispose()
+        $fixtureProcess = $null
+    } finally {
+        Remove-Item Function:\Get-ItemPropertyValue
+        Remove-Item Function:\Get-CimInstance
+    }
+
+    # Exercise the real wrapper's finally path with harmless isolated entrypoints:
+    # a zero exit clears its matching record, while a crashing root can leave a
+    # child alive and must retain provenance that blocks another launch.
+    foreach ($directory in @($fixtureInstall, $fixtureScripts, $fixtureSource)) { [void](Initialize-PrivateDirectory $directory) }
+    foreach ($name in @('Start-Agents.ps1', 'Resolve-StartupPaths.ps1', 'Common.ps1')) {
+        [IO.File]::WriteAllText((Join-Path $fixtureScripts $name), [IO.File]::ReadAllText((Join-Path $PSScriptRoot $name)))
+    }
+    $isolatedStart = Join-Path $fixtureScripts 'Start-Agents.ps1'
+    $isolatedMain = Join-Path $fixtureSource 'main.mjs'
+    [IO.File]::WriteAllText($isolatedMain, 'process.exit(0);')
+    $output = @(& $isolatedStart -Config $resolvedConfig *>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath $recordPath)) { throw 'A completed zero exit did not clear its matching record.' }
+    [IO.File]::WriteAllText($isolatedMain, 'import {spawn} from "node:child_process"; import {writeFileSync} from "node:fs"; const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {stdio:"ignore", windowsHide:true, detached:true}); writeFileSync(process.argv[3]+".childpid", String(child.pid)); child.unref(); process.exit(1);')
+    $output = @(& $isolatedStart -Config $resolvedConfig *>&1) -join "`n"
+    if ($LASTEXITCODE -ne 1 -or -not (Test-Path -LiteralPath $recordPath)) { throw 'A crashing root lost its process record.' }
+    $fixtureDescendant = Get-Process -Id ([int][IO.File]::ReadAllText($childPidPath))
+    [void]$fixtureDescendant.Handle
+    Assert-FixtureStartupRefused $isolatedStart
+    if ($fixtureDescendant.HasExited) { throw 'Refused startup changed the orphaned fixture child.' }
+    $fixtureDescendant.Kill()
+    [void]$fixtureDescendant.WaitForExit(5000)
+    $fixtureDescendant.Dispose()
+    $fixtureDescendant = $null
+    Remove-Item -LiteralPath $childPidPath
+    Remove-Item -LiteralPath $recordPath
 
     $canary = 'synthetic-private-value-never-log'
     [IO.File]::WriteAllText($resolvedConfig, ('{"broken":"' + $canary))
@@ -212,7 +342,7 @@ try {
         foreach ($name in @('Get-ScheduledTask', 'Get-ScheduledTaskInfo', 'Stop-ScheduledTask', 'Start-ScheduledTask', 'Start-Sleep')) { Remove-Item -LiteralPath ('Function:\' + $name) }
     }
     if (-not $detectedFailure) { throw 'Restart reported success for a runner that immediately exited.' }
-    Write-Host 'PASS: physical paths, child exit propagation, safe diagnostics, orphan recovery, PID/argv mismatch refusal, record preservation, legacy runner protection, and failed-start detection.'
+    Write-Host 'PASS: startup paths, process-tree recovery, same-boot refusal, prior-boot proof, clock/counter validation, record preservation, and failed-start detection.'
 } finally {
     if ($verifiedChild) {
         foreach ($descendant in $verifiedChild.Descendants) { $descendant.Dispose() }
@@ -233,7 +363,10 @@ try {
     }
     $fixtureLock = Join-Path $stateDir 'runner.lock'
     if (Test-Path -LiteralPath $fixtureLock) { Remove-Item -LiteralPath $fixtureLock -Force }
-    foreach ($directory in @($stateDir, $worktreesRoot, $testRoot)) {
+    foreach ($file in @((Join-Path $fixtureSource 'main.mjs'), (Join-Path $fixtureScripts 'Start-Agents.ps1'), (Join-Path $fixtureScripts 'Resolve-StartupPaths.ps1'), (Join-Path $fixtureScripts 'Common.ps1'))) {
+        if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+    }
+    foreach ($directory in @($fixtureSource, $fixtureScripts, $fixtureInstall, $stateDir, $worktreesRoot, $testRoot)) {
         if (Test-Path -LiteralPath $directory) { [IO.Directory]::Delete($directory, $false) }
     }
 }
