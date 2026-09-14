@@ -82,7 +82,14 @@ test('Windows workspace profile applies exact read/write grants on start, resume
       [nodeExecutable]: 'read',
     }, network: { enabled: false } });
     assert.equal(params.config['permissions.enigma_workspace'].filesystem[nodeDirectory], undefined);
-    assert.ok(params.developerInstructions.includes(`"${nodeExecutable}" --test`));
+    const literalCommand = params.developerInstructions.split('```cmd\n')[1].split('\n```')[0];
+    assert.ok(literalCommand.startsWith('call '));
+    assert.ok(literalCommand.includes(nodeExecutable));
+    assert.ok(literalCommand.endsWith(' --preserve-symlinks --preserve-symlinks-main --test'));
+    if (/^[A-Za-z]:\\[A-Za-z0-9_.\\-]+$/.test(nodeExecutable)) assert.equal(literalCommand.includes('"'), false);
+    assert.ok(params.developerInstructions.includes('do not request approval or escalation'));
+    assert.ok(params.developerInstructions.includes('Atlas for host validation'));
+    assert.equal(params.developerInstructions.includes('--test-isolation=none'), false);
   }
   assert.equal(starts[1].params.excludeTurns, true);
   for (const { params } of h.sent.filter(message => message.method === 'turn/start')) {
