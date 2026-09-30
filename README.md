@@ -1,6 +1,6 @@
 # Enigma
 
-Enigma connects private project Slack channels to the installed Codex app-server on your Windows computer. You send a request to Atlas; work runs in the channel's assigned repository and an isolated Git worktree using your existing ChatGPT subscription sign-in. There are no npm runtime dependencies or OpenAI API keys.
+Enigma connects private project Slack channels to the installed Codex app-server on your Windows computer. You send a request to Atlas; work runs in the channel's assigned repository and an isolated Git worktree using your existing ChatGPT subscription sign-in. Atlas and specialists request GPT-6.1 Sol with Medium reasoning and fail if those settings are unavailable. There are no npm runtime dependencies or OpenAI API keys.
 
 Start with **[Windows setup](docs/SETUP.md)**. Slack workspace: [enigma777](https://enigma777.slack.com). Repository: [kenschristian/Enigma](https://github.com/kenschristian/Enigma).
 
@@ -19,7 +19,7 @@ Start with **[Windows setup](docs/SETUP.md)**. Slack workspace: [enigma777](http
 
 You can also choose [native Devin](docs/DEVIN-WORKFLOW.md) in a fresh thread. Ask Atlas to reserve it or prepare a structured prompt, then send your own `@Devin` mention in that thread. Preparation uses no model call. Enigma blocks its Codex workers in Devin-selected threads; it cannot observe native-only mentions or stop Devin itself. Executor changes need a new thread and preservation of any earlier work. No usage monitoring or automatic provider switching is performed.
 
-Use a real Slack mention in an explicitly allowed channel. These are ordinary messages, not slash commands. The team profiles are **Atlas - Manager**, **Forge - Back End Engineer**, **Nova - Front End Engineer**, and **Bridge - API Engineer**, each with its own [avatar](assets/agents/README.md). Mention Atlas for coordinated work or a specialist for its own responsibility. Runtime roles remain `frontend`, `backend`, and `api`; at most three specialists run concurrently.
+Use a real Slack mention in an explicitly allowed channel. These are ordinary messages, not slash commands. The team profiles are **Atlas - Manager**, **Forge - Back End Engineer**, **Nova - Front End Engineer**, and **Bridge - API Engineer**, each with its own [avatar](assets/agents/README.md). Mention Atlas for coordinated work or a specialist for its own responsibility. Specialist responsibilities remain `frontend`, `backend`, and `api`; child agents use a selectable worker runtime with explicit Sol Medium controls when named runtime types impose other settings. At most three specialists run concurrently.
 
 Use **#enigma-work** for this bridge and **#jarvis-work** for Jarvis. Each project also has private `-pull-requests`, `-code-review`, and `-updates` channels. The [team prompt](docs/SLACK-TEAM-PROMPT.md) explains their purposes. Completed coding work goes to Atlas for a **Ready for Review** pull request (PR). Greptile reviews once; agents fix valid issues, test the changes, and run required checks without requesting another Greptile pass. Wait for Atlas to tag you after those checks pass before clicking **Merge** on GitHub. The [review workflow](docs/REVIEW-WORKFLOW.md) and separately activated [Codex monitor](docs/REVIEW-MONITOR.md) govern that handoff.
 

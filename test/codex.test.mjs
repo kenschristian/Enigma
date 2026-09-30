@@ -9,8 +9,8 @@ import { CodexClient, codexEnvironment } from '../src/codex.mjs';
 const cwd = process.cwd();
 const nodeExecutable = realpathSync.native(process.execPath);
 const nodeDirectory = dirname(nodeExecutable);
-const options = { cwd, model: 'gpt-6-astra', effort: 'ultra', prompt: 'Build it.' };
-const model = { id: 'gpt-6-astra', model: 'gpt-6-astra', supportedReasoningEfforts: [{ reasoningEffort: 'ultra' }, { reasoningEffort: 'high' }] };
+const options = { cwd, model: 'gpt-6.1-sol', effort: 'medium', prompt: 'Build it.' };
+const model = { id: 'gpt-6.1-sol', model: 'gpt-6.1-sol', supportedReasoningEfforts: [{ reasoningEffort: 'medium' }] };
 
 function harness(handler = () => false, clientOptions = {}) {
   const child = new EventEmitter();
@@ -38,7 +38,7 @@ function harness(handler = () => false, clientOptions = {}) {
           enigma_workspace: { ...client.workspace.profile, extends: null, workspace_roots: null, description: null },
         } } });
         if (['thread/start', 'thread/resume'].includes(message.method)) respond(message, {
-          thread: { id: message.params.threadId ?? 'thread-1' }, model: 'gpt-6-astra', modelProvider: 'openai',
+          thread: { id: message.params.threadId ?? 'thread-1' }, model: 'gpt-6.1-sol', modelProvider: 'openai',
           ...(message.params.permissions ? { activePermissionProfile: { id: message.params.permissions, extends: null },
             runtimeWorkspaceRoots: message.params.runtimeWorkspaceRoots } : {}),
         });
@@ -126,7 +126,7 @@ test('Windows profile confirmation fails closed for absent, substituted or broad
   ]) {
     const h = harness((message, { respond }) => {
       if (!['thread/start', 'thread/resume'].includes(message.method)) return false;
-      respond(message, { thread: { id: 'thread-1' }, model: 'gpt-6-astra', modelProvider: 'openai',
+      respond(message, { thread: { id: 'thread-1' }, model: 'gpt-6.1-sol', modelProvider: 'openai',
         activePermissionProfile: { id: 'enigma_workspace', extends: null }, runtimeWorkspaceRoots: [cwd], ...changes }); return true;
     }, { workspace: { path: cwd, gitCommonDir: join(cwd, 'repo', '.git') } }); t.after(() => h.client.close());
     await assert.rejects(h.client.run(options), { code: 'CODEX_PROFILE' });
@@ -283,19 +283,19 @@ test('saves thread before work, preserves native role config, collects final mes
     return true;
   }); t.after(() => h.client.close());
   const result = await h.client.run({ ...options,
-    config: { 'agents.enabled': true, 'agents.default_subagent_reasoning_effort': 'high', sandbox_mode: 'danger-full-access' },
+    config: { 'agents.enabled': true, 'agents.default_subagent_reasoning_effort': 'medium', sandbox_mode: 'danger-full-access' },
     onThread: async id => { await tick(); assert.equal(id, 'thread-1'); saved = true; },
     onProgress: value => progress.push(value),
   });
   assert.deepEqual(result, { threadId: 'thread-1', turnId: 'turn-1', text: 'Done.', status: 'completed' });
   const thread = h.sent.find(x => x.method === 'thread/start').params;
   assert.equal(thread.config['agents.enabled'], true);
-  assert.equal(thread.config['agents.default_subagent_reasoning_effort'], 'high');
+  assert.equal(thread.config['agents.default_subagent_reasoning_effort'], 'medium');
   assert.equal(thread.config.sandbox_mode, 'workspace-write');
-  assert.equal(thread.config.model_reasoning_effort, 'ultra');
+  assert.equal(thread.config.model_reasoning_effort, 'medium');
   assert.equal(thread.approvalsReviewer, 'user');
   const turn = h.sent.find(x => x.method === 'turn/start').params;
-  assert.equal(turn.effort, 'ultra');
+  assert.equal(turn.effort, 'medium');
   assert.equal(turn.sandboxPolicy.networkAccess, false);
   assert.deepEqual(turn.sandboxPolicy.writableRoots, [cwd]);
   assert.deepEqual(progress, [{ type: 'working' }]);

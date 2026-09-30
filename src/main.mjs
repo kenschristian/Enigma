@@ -4,7 +4,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { loadConfig, defaultConfigPath, MODEL, redact } from './config.mjs';
+import { loadConfig, defaultConfigPath, MODEL, EFFORT, redact } from './config.mjs';
 import { CodexClient } from './codex.mjs';
 import { TaskStore } from './store.mjs';
 import { WorktreeManager } from './worktrees.mjs';
@@ -21,11 +21,10 @@ export async function doctor(config, { log = console.log, Client = CodexClient }
     if (!account.account || !['chatgpt', 'chatgptAuthTokens'].includes(account.account.type)) throw new Error('Sign into the installed Codex CLI with your existing ChatGPT account. API-key billing is not used.');
     log('PASS: Existing ChatGPT sign-in.');
     const models = await client.models();
-    const model = models.find(m => m.model === MODEL || m.id === MODEL);
-    if (!model) throw new Error('GPT-6 Astra is unavailable to this Codex account. No model was substituted.');
-    const efforts = model.supportedReasoningEfforts.map(e => typeof e === 'string' ? e : e.reasoningEffort);
-    if (!efforts.includes('ultra') || !efforts.includes('high')) throw new Error('This Codex runtime does not expose both Astra Ultra and High. No setting was substituted.');
-    log('PASS: GPT-6 Astra supports Ultra for Atlas and High for specialists.');
+    const model = models.find(m => m.model === MODEL);
+    if (!model) throw new Error('GPT-6.1 Sol is unavailable to this Codex account. No model was substituted.');
+    if (!Array.isArray(model.supportedReasoningEfforts) || !model.supportedReasoningEfforts.some(e => e?.reasoningEffort === EFFORT)) throw new Error('This Codex runtime does not expose GPT-6.1 Sol Medium. No setting was substituted.');
+    log('PASS: GPT-6.1 Sol supports Medium for Atlas and specialists.');
     if (config) {
       for (const project of configuredProjects(config)) {
         await new WorktreeManager(project).inspect();

@@ -245,5 +245,5 @@ test('Atlas may route specialist roles while dedicated bots retain their exact c
   await drain(service);
   assert.equal(store.list()[0].status, 'completed');
   assert.equal(seen.runs.length, 2);
-  assert.ok(seen.runs.every(run => run.effort === 'high'));
+  assert.ok(seen.runs.every(run => run.model === 'gpt-6.1-sol' && run.effort === 'medium'));
 });

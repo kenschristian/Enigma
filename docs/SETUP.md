@@ -1,6 +1,6 @@
 # Windows setup
 
-Allow about 15 minutes for Slack configuration. You need the existing Windows user, Git, Node.js 24 or newer, the installed Codex executable, and permission to install an app in [enigma777.slack.com](https://enigma777.slack.com). You do not need an OpenAI API key or a second provider account.
+Allow about 15 minutes for Slack configuration. You need the existing Windows user, Git, Node.js 24 or newer, the installed Codex executable, and permission to install an app in [enigma777.slack.com](https://enigma777.slack.com). The existing Codex account must expose GPT-6.1 Sol with Medium reasoning for Atlas and specialists; the bridge checks these settings and does not substitute another model or effort. You do not need an OpenAI API key or a second provider account.
 
 ## 1. Create the Slack app
 

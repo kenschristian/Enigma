@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TaskStore } from '../src/store.mjs';
 import { AgentService } from '../src/service.mjs';
+import { roleInstructions } from '../src/roles.mjs';
 
 const config = {allowedTeamId:'T1',allowedUserIds:['U1'],allowedChannelIds:['C1'],bots:[{key:'atlas',role:'atlas'}],maxConcurrent:1,taskTimeoutMinutes:1};
 const connection = {bot:{key:'atlas',role:'atlas'},botUserId:'UBOT'};
@@ -19,12 +20,39 @@ function fixture(options = {}) {
 }
 async function drained(service) { while(service.active.size) await Promise.allSettled([...service.active.values()].map(a=>a.promise)); }
 
+test('every role starts and resumes with Sol Medium and matching child controls', async t => {
+  for (const [role, prefix] of [['atlas', ''], ['frontend', 'nova: '], ['backend', 'forge: '], ['api', 'bridge: ']]) {
+    await t.test(role, async t => {
+      const { store, service, calls } = fixture(); t.after(() => store.close());
+      service.receive(event('E1', `${prefix}inspect assigned work`), connection);
+      service.pump(); await drained(service);
+      service.receive(event('E2', `${prefix}continue assigned work`), connection);
+      service.pump(); await drained(service);
+      assert.equal(calls.length, 2);
+      assert.equal(store.list()[0].role, role);
+      assert.equal(calls[0].threadId, undefined);
+      assert.equal(calls[1].threadId, 'thread-1');
+      for (const call of calls) {
+        assert.equal(call.model, 'gpt-6.1-sol');
+        assert.equal(call.effort, 'medium');
+        assert.equal(call.config['agents.default_subagent_model'], 'gpt-6.1-sol');
+        assert.equal(call.config['agents.default_subagent_reasoning_effort'], 'medium');
+        assert.equal(call.config['agents.max_concurrent_threads_per_session'], 3);
+        assert.match(call.instructions, /GPT-6\.1 Sol Medium/);
+        assert.doesNotMatch(call.instructions, /Astra|Ultra|gpt-6-astra/);
+      }
+    });
+  }
+  assert.match(roleInstructions('atlas'), /runtime agent type worker with explicit gpt-6\.1-sol and medium controls/);
+  assert.match(roleInstructions('atlas'), /Named frontend\/backend\/api runtime types can impose their own model and effort/);
+});
+
 test('duplicate Slack deliveries launch one task and thread resumes on later mention',async()=>{
   const {store,service,calls}=fixture();
   assert.equal(service.receive(event('E1','fix it'),connection),true);
   service.receive(event('E1','fix it'),connection);
   service.pump();await drained(service);
-  assert.equal(calls.length,1);assert.equal(calls[0].effort,'ultra');
+  assert.equal(calls.length,1);assert.equal(calls[0].effort,'medium');
   service.receive(event('E2','now test it'),connection);service.pump();await drained(service);
   assert.equal(calls.length,2);assert.equal(calls[1].threadId,'thread-1');
   assert.equal(store.list()[0].status,'completed');store.close();

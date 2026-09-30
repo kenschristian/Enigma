@@ -2,7 +2,8 @@ import { readFileSync, lstatSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-export const MODEL = 'gpt-6-astra';
+export const MODEL = 'gpt-6.1-sol';
+export const EFFORT = 'medium';
 export const ROLES = Object.freeze({ atlas: 'Atlas', frontend: 'Nova', backend: 'Forge', api: 'Bridge' });
 export const defaultConfigPath = () => path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share'), 'EnigmaAgents', 'config.json');
 

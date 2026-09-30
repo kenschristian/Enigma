@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
-import { MODEL, ROLES, redact } from './config.mjs';
+import { MODEL, EFFORT, ROLES, redact } from './config.mjs';
 import { roleInstructions, agentConfig } from './roles.mjs';
 import { splitMessage } from './slack.mjs';
 import { projectIdentity } from './projects.mjs';
@@ -195,7 +195,7 @@ export class AgentService {
       this.reply(task, `${ROLES[task.role]} started ${task.id}. Branch: ${worktree.branch}.`);
       const outcome = await client.run({
         threadId: previous?.codexThreadId || undefined, cwd: worktree.path, model: MODEL,
-        effort: task.role === 'atlas' ? 'ultra' : 'high', instructions: roleInstructions(task.role), config: agentConfig,
+        effort: EFFORT, instructions: roleInstructions(task.role), config: agentConfig,
         prompt: previous?.codexThreadId ? `Continue this conversation. First inspect the existing work and handoff notes; do not repeat completed actions.\n\n${task.prompt}` : task.prompt,
         timeoutMs: this.config.taskTimeoutMinutes * 60000, signal,
         onThread: threadId => this.store.update(task.id, { codexThreadId: threadId }),
